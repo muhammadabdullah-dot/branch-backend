@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from tortoise.transactions import atomic
 
+from app.core.device_context import get_device_id
 from app.models import (
     GRN,
     Adjustment,
@@ -82,10 +83,21 @@ async def receive_grn(user: User, payload: GRNCreateRequest) -> GRN:
             unit_price=line.unitPrice, disc_percent=line.discPercent,
             expiry=line.expiry, tax_rate=line.taxRate,
         )
+
+        # Weighted-average cost basis (contracts.md gap: no COGS/margin basis existed anywhere).
+        # Bonus units are free — they dilute the average, never raise it, matching real costing.
+        old_balance = await balance_for(product.id)
+        incoming_qty = line.qty + line.bonusQty
+        new_total_qty = old_balance + incoming_qty
+        if new_total_qty > 0:
+            old_cost_value = product.avg_cost * old_balance if old_balance > 0 else Decimal("0")
+            product.avg_cost = (old_cost_value + line.qty * line.unitPrice) / new_total_qty
+            await product.save(update_fields=["avg_cost"])
+
         # Bonus quantity genuinely adds to physical stock (contracts.md §6).
         await StockMovement.create(
             product=product, location=location, kind="receive",
-            qty=line.qty + line.bonusQty, origin_user=user, at=datetime.now(timezone.utc),
+            qty=incoming_qty, origin_user=user, at=datetime.now(timezone.utc),
         )
         if line.expiry:
             await Batch.create(product=product, lot_number=None, expiry=line.expiry, received_qty=line.qty + line.bonusQty)
@@ -93,7 +105,7 @@ async def receive_grn(user: User, payload: GRNCreateRequest) -> GRN:
     await OutboxEvent.create(
         aggregate_type="GRN", aggregate_id=str(grn.id),
         payload={"grnNumber": grn.grn_number, "locationId": payload.locationId},
-        origin_user_id=str(user.id),
+        origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     await grn.fetch_related("lines")
     return grn
@@ -122,7 +134,7 @@ async def submit_count(user: User, payload: CountSubmitRequest) -> PhysicalCount
     await OutboxEvent.create(
         aggregate_type="PhysicalCount", aggregate_id=str(count.id),
         payload={"productId": payload.productId, "locationId": payload.locationId},
-        origin_user_id=str(user.id),
+        origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return count
 
@@ -143,7 +155,7 @@ async def approve_count(user: User, count_id: str) -> PhysicalCount:
     await count.save()
     await OutboxEvent.create(
         aggregate_type="PhysicalCount", aggregate_id=str(count.id),
-        payload={"event": "approved", "delta": str(delta)}, origin_user_id=str(user.id),
+        payload={"event": "approved", "delta": str(delta)}, origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return count
 
@@ -166,7 +178,7 @@ async def submit_adjustment(user: User, payload: AdjustmentSubmitRequest) -> Adj
     await OutboxEvent.create(
         aggregate_type="Adjustment", aggregate_id=str(adjustment.id),
         payload={"productId": payload.productId, "reason": payload.reason},
-        origin_user_id=str(user.id),
+        origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return adjustment
 
@@ -186,7 +198,7 @@ async def approve_adjustment(user: User, adjustment_id: str) -> Adjustment:
     await adjustment.save()
     await OutboxEvent.create(
         aggregate_type="Adjustment", aggregate_id=str(adjustment.id),
-        payload={"event": "approved", "signedQty": str(signed_qty)}, origin_user_id=str(user.id),
+        payload={"event": "approved", "signedQty": str(signed_qty)}, origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return adjustment
 
@@ -201,6 +213,6 @@ async def reject_adjustment(user: User, adjustment_id: str) -> Adjustment:
     await adjustment.save()
     await OutboxEvent.create(
         aggregate_type="Adjustment", aggregate_id=str(adjustment.id),
-        payload={"event": "rejected"}, origin_user_id=str(user.id),
+        payload={"event": "rejected"}, origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return adjustment

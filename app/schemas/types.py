@@ -10,3 +10,9 @@ Money = Annotated[Decimal, PlainSerializer(lambda v: format(Decimal(v), "f"), re
 # Same fix, same root cause — any DecimalField (qty included) can round-trip through SQLite
 # normalized, not just money. Separate alias purely for readability at the call site.
 Qty = Money
+
+
+def money_str(value: Decimal) -> str:
+    """Same fixed-point fix as the Money/Qty serializers, for a Decimal interpolated directly
+    into an f-string (error messages) rather than returned through a Pydantic schema."""
+    return format(Decimal(value), "f")

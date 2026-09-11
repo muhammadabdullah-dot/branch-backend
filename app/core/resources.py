@@ -14,6 +14,8 @@ RESOURCES: list[str] = [
     "store.counters",
     "store.staff-on-duty",
     "inventory.overview",
+    "inventory.catalog",
+    "inventory.suppliers",
     "inventory.receiving",
     "inventory.movements",
     "inventory.batches",

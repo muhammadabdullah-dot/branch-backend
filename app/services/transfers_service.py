@@ -1,5 +1,6 @@
 from tortoise.transactions import atomic
 
+from app.core.device_context import get_device_id
 from app.models import OutboxEvent, Transfer, User
 
 
@@ -22,7 +23,7 @@ async def open_dispute(user: User, transfer_id: str, note: str) -> Transfer:
     await transfer.save()
     await OutboxEvent.create(
         aggregate_type="Transfer", aggregate_id=str(transfer.id),
-        payload={"event": "dispute_opened", "note": note}, origin_user_id=str(user.id),
+        payload={"event": "dispute_opened", "note": note}, origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     await transfer.fetch_related("lines")
     return transfer

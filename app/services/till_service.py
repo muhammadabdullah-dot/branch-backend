@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from tortoise.transactions import atomic
 
+from app.core.device_context import get_device_id
 from app.models import CashMovement, OutboxEvent, ReturnRecord, SaleRecord, TillSession, User, next_value
 
 ZERO = Decimal("0")
@@ -46,7 +47,7 @@ async def open_till(user: User, denominations: dict[str, int], notes: str) -> Ti
         aggregate_type="TillSession",
         aggregate_id=str(till.id),
         payload={"sessionNumber": session_number, "event": "opened", "openingFloat": str(total)},
-        origin_user_id=str(user.id),
+        origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return till
 
@@ -64,7 +65,7 @@ async def record_movement(user: User, kind: str, denominations: dict[str, int], 
         aggregate_type="CashMovement",
         aggregate_id=str(movement.id),
         payload={"tillSessionId": str(till.id), "kind": kind, "amount": str(amount)},
-        origin_user_id=str(user.id),
+        origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return movement
 
@@ -126,6 +127,6 @@ async def close_till(user: User, counted_denominations: dict[str, int]) -> dict:
         aggregate_type="TillSession",
         aggregate_id=str(till.id),
         payload={"sessionNumber": till.session_number, "event": "closed", "netCash": str(breakdown["netCash"])},
-        origin_user_id=str(user.id),
+        origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return {**breakdown, "sessionNumber": till.session_number, "countedCash": counted_cash, "variance": variance}

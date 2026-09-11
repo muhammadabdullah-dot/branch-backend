@@ -1,5 +1,4 @@
-"""Reference data — Product/PaymentMethod. Seeded once; no write endpoints in I3 (catalog management
-is out of this iteration's scope). Shape matches contracts.md §3.1 / frontend-baseline.md §2.2."""
+"""Reference data — Product/PaymentMethod. Shape matches contracts.md §3.1 / frontend-baseline.md §2.2."""
 from tortoise import fields, models
 
 
@@ -14,6 +13,10 @@ class Product(models.Model):
     barcode = fields.CharField(max_length=40, null=True, unique=True)
     pack_unit = fields.CharField(max_length=40, null=True)
     pack_size = fields.IntField(null=True)
+    # Weighted-average cost, updated on every GRN receipt (inventory_service.receive_grn).
+    # Closes the "no COGS/margin basis anywhere" gap — nothing reads this yet (no margin report
+    # exists), but the cost basis is captured from day one instead of being unrecoverable later.
+    avg_cost = fields.DecimalField(max_digits=12, decimal_places=4, default=0)
 
     class Meta:
         table = "products"

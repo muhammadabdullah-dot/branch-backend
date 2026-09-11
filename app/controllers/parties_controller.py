@@ -1,6 +1,7 @@
 from fastapi import HTTPException, status
 
 from app.models import Party
+from app.schemas.import_result import ImportSummary
 from app.schemas.parties import PartyCreate, PartyOut, PartyUpdate
 from app.services import parties_service
 
@@ -29,3 +30,7 @@ async def update(party_id: str, data: PartyUpdate) -> PartyOut:
     if not party:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Party not found")
     return _to_out(party)
+
+
+async def import_file(filename: str, content: bytes) -> ImportSummary:
+    return await parties_service.import_parties(filename, content)

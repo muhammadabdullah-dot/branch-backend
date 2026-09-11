@@ -1,5 +1,6 @@
 from app.models.catalog import PaymentMethod, Product
 from app.models.corrections import Adjustment, PhysicalCount
+from app.models.device import Device
 from app.models.gift_voucher import GiftVoucher, VoucherRedemption
 from app.models.grn import GRN, Batch, GRNLine
 from app.models.held_bill import HeldBill
@@ -25,6 +26,7 @@ __all__ = [
     "PaymentMethod",
     "Location",
     "Supplier",
+    "Device",
     "Party",
     "TillSession",
     "CashMovement",

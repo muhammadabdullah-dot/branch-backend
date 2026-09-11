@@ -3,8 +3,10 @@ from tortoise.contrib.fastapi import register_tortoise
 
 from app.core.config import TORTOISE_ORM, settings
 from app.core.network import get_lan_ip
+from app.middlewares.device import device_identity_middleware
 from app.middlewares.error_handler import register_error_handlers
 from app.routes.auth import router as auth_router
+from app.routes.catalog import router as catalog_router
 from app.routes.gift_vouchers import router as gift_vouchers_router
 from app.routes.health import router as health_router
 from app.routes.held_bills import router as held_bills_router
@@ -13,10 +15,13 @@ from app.routes.parties import router as parties_router
 from app.routes.rbac import router as rbac_router
 from app.routes.rbac import users_router
 from app.routes.sales import router as sales_router
+from app.routes.suppliers import router as suppliers_router
 from app.routes.till import router as till_router
 from app.services.seed_service import seed_if_empty
 
 app = FastAPI(title=settings.app_name)
+
+app.middleware("http")(device_identity_middleware)
 
 register_error_handlers(app)
 app.include_router(health_router)
@@ -29,6 +34,8 @@ app.include_router(sales_router)
 app.include_router(held_bills_router)
 app.include_router(gift_vouchers_router)
 app.include_router(inventory_router)
+app.include_router(catalog_router)
+app.include_router(suppliers_router)
 
 register_tortoise(app, config=TORTOISE_ORM, generate_schemas=False, add_exception_handlers=True)
 

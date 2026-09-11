@@ -7,6 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from tortoise.transactions import atomic
 
+from app.core.device_context import get_device_id
 from app.models import (
     Location,
     OutboxEvent,
@@ -21,6 +22,7 @@ from app.models import (
     next_value,
 )
 from app.schemas.sales import SaleCreateRequest
+from app.schemas.types import money_str
 from app.services import gift_voucher_service
 from app.services.rbac_service import has_permission
 
@@ -103,7 +105,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
 
     received = sum(payload.tenders.values(), ZERO)
     if received < net_value:
-        raise SaleError(f"Payment not covered — remaining {net_value - received}")
+        raise SaleError(f"Payment not covered — remaining {money_str(net_value - received)}")
     cash_back = max(ZERO, received - net_value)
 
     earned_points = 0
@@ -113,7 +115,23 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
     invoice_seq = await next_value("invoice", 143)
     invoice_number = f"HO-2026-{invoice_seq:06d}"
     fbr_invoice_number = f"7000-{invoice_number[-8:]}"
-    is_credit_sale = payload.tenders.get("CREDIT", ZERO) > 0
+    credit_amount = payload.tenders.get("CREDIT", ZERO)
+    is_credit_sale = credit_amount > 0
+
+    # Credit-limit enforcement (previously: creditBalance was seeded but never checked or
+    # updated anywhere — legacy's "Check Balance Limit" had no equivalent at all).
+    if is_credit_sale:
+        if not party.credit_allowed:
+            raise SaleError(f"{party.name} is not allowed credit sales")
+        new_balance = party.credit_balance + credit_amount
+        if new_balance > party.credit_limit:
+            headroom = party.credit_limit - party.credit_balance
+            raise SaleError(
+                f"Credit sale of {money_str(credit_amount)} exceeds {party.name}'s "
+                f"remaining headroom of {money_str(headroom)}"
+            )
+        party.credit_balance = new_balance
+        await party.save(update_fields=["credit_balance"])
 
     sale = await SaleRecord.create(
         invoice_number=invoice_number,
@@ -165,7 +183,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
         aggregate_type="SaleRecord",
         aggregate_id=str(sale.id),
         payload={"invoiceNumber": invoice_number, "netValue": str(net_value), "partyId": str(party.id)},
-        origin_user_id=str(cashier.id),
+        origin_user_id=str(cashier.id), origin_device_id=get_device_id(),
     )
 
     await sale.fetch_related("lines__product", "tenders", "party", "cashier", "discount_override_by")

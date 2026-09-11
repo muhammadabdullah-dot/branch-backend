@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from tortoise.transactions import atomic
 
+from app.core.device_context import get_device_id
 from app.models import Location, OutboxEvent, Product, ReturnLine, ReturnRecord, SaleRecord, StockMovement, TillSession, User
 from app.schemas.sales import ReturnCreateRequest
 
@@ -50,7 +51,7 @@ async def create_return(cashier: User, payload: ReturnCreateRequest) -> ReturnRe
         aggregate_type="ReturnRecord",
         aggregate_id=str(record.id),
         payload={"against": sale.invoice_number, "refundTotal": str(refund_total)},
-        origin_user_id=str(cashier.id),
+        origin_user_id=str(cashier.id), origin_device_id=get_device_id(),
     )
 
     await record.fetch_related("against", "cashier")
