@@ -1,4 +1,4 @@
-from app.models.catalog import PaymentMethod, Product
+from app.models.catalog import PaymentMethod, Product, ProductAlias
 from app.models.corrections import Adjustment, PhysicalCount
 from app.models.device import Device
 from app.models.gift_voucher import GiftVoucher, VoucherRedemption
@@ -23,6 +23,7 @@ __all__ = [
     "User",
     "UserPermission",
     "Product",
+    "ProductAlias",
     "PaymentMethod",
     "Location",
     "Supplier",

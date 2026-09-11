@@ -1,8 +1,14 @@
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
 
 from app.schemas.types import Money
+
+
+class ProductAliasOut(BaseModel):
+    code: str
+    remarks: str | None = None
 
 
 class ProductOut(BaseModel):
@@ -17,6 +23,20 @@ class ProductOut(BaseModel):
     packUnit: str | None = None
     packSize: int | None = None
     avgCost: Money
+    rpp: Money | None = None
+    department: str | None = None
+    category: str | None = None
+    itemClass: str | None = None
+    subclass: str | None = None
+    manufacturer: str | None = None
+    brand: str | None = None
+    active: bool
+    aliases: list[ProductAliasOut] = []
+
+
+class ProductListOut(BaseModel):
+    items: list[ProductOut]
+    total: int
 
 
 class ProductCreate(BaseModel):
@@ -25,10 +45,19 @@ class ProductCreate(BaseModel):
     price: Decimal
     taxRate: Decimal = Decimal("0")
     isWeighed: bool = False
-    unit: str
+    unit: str = "pc"
     barcode: str | None = None
     packUnit: str | None = None
     packSize: int | None = None
+    avgCost: Decimal | None = None
+    rpp: Decimal | None = None
+    department: str | None = None
+    category: str | None = None
+    itemClass: str | None = None
+    subclass: str | None = None
+    manufacturer: str | None = None
+    brand: str | None = None
+    active: bool = True
 
 
 class SupplierOut(BaseModel):

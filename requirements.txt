@@ -8,4 +8,5 @@ bcrypt
 pyjwt
 tzdata
 openpyxl
+xlrd
 python-multipart

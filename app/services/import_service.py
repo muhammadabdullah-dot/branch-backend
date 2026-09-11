@@ -6,6 +6,7 @@ import csv
 import io
 
 import openpyxl
+import xlrd
 
 
 class ImportFormatError(Exception):
@@ -33,7 +34,31 @@ def parse_rows(filename: str, content: bytes) -> list[dict]:
                 continue
             rows.append({header[i]: raw_row[i] for i in range(len(header)) if i < len(raw_row)})
         return rows
-    raise ImportFormatError(f"Unsupported file type: {filename} (use .csv or .xlsx)")
+    if lower.endswith(".xls"):
+        # Legacy binary Excel format — real exports from the old system come out this way.
+        workbook = xlrd.open_workbook(file_contents=content)
+        sheet = workbook.sheet_by_index(0)
+        if sheet.nrows == 0:
+            return []
+        header = [str(h).strip() for h in sheet.row_values(0)]
+        rows = []
+        for r in range(1, sheet.nrows):
+            values = sheet.row_values(r)
+            if all(v == "" for v in values):
+                continue
+            rows.append({header[i]: values[i] for i in range(len(header)) if i < len(values)})
+        return rows
+    raise ImportFormatError(f"Unsupported file type: {filename} (use .csv, .xlsx, or .xls)")
+
+
+def cell_str_any(row: dict, *keys: str) -> str | None:
+    """Tries each header spelling in order — the two real catalog exports disagree on
+    'SALES PRICE' vs 'SALE PRICE', 'SUBCLASS' vs 'SUB CLASS', etc."""
+    for key in keys:
+        value = cell_str(row, key)
+        if value is not None:
+            return value
+    return None
 
 
 def cell_str(row: dict, key: str) -> str | None:
