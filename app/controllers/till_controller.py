@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import HTTPException, status
 
 from app.models import User
@@ -9,6 +11,8 @@ from app.schemas.till import (
     TillCloseRequest,
     TillCurrentOut,
     TillOpenRequest,
+    TillSessionListOut,
+    TillSessionSummaryOut,
 )
 from app.services import till_service
 
@@ -66,3 +70,17 @@ async def close(user: User, payload: TillCloseRequest) -> TillCloseOut:
     except till_service.TillError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
     return TillCloseOut(**result)
+
+
+async def list_sessions(from_at: datetime | None, to_at: datetime | None, limit: int, offset: int) -> TillSessionListOut:
+    limit = min(max(limit, 1), 500)
+    offset = max(offset, 0)
+    sessions, total = await till_service.list_closed_sessions(from_at, to_at, limit, offset)
+    items = [
+        TillSessionSummaryOut(
+            sessionNumber=s.session_number, cashierId=str(s.opened_by_id), openedAt=s.opened_at, closedAt=s.closed_at,
+            openingFloat=s.opening_float, netCash=s.net_cash, countedCash=s.counted_cash, variance=s.variance,
+        )
+        for s in sessions
+    ]
+    return TillSessionListOut(items=items, total=total)

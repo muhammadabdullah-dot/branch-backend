@@ -54,6 +54,22 @@ class TillCloseOut(BaseModel):
     variance: Money
 
 
+class TillSessionSummaryOut(BaseModel):
+    sessionNumber: str
+    cashierId: str
+    openedAt: datetime
+    closedAt: datetime
+    openingFloat: Money
+    netCash: Money
+    countedCash: Money
+    variance: Money
+
+
+class TillSessionListOut(BaseModel):
+    items: list[TillSessionSummaryOut]
+    total: int
+
+
 class TillClosePreviewOut(BaseModel):
     grossSale: Money
     totalDisc: Money

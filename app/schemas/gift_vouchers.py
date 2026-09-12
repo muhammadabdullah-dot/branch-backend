@@ -17,6 +17,11 @@ class GiftVoucherOut(BaseModel):
     status: str
 
 
+class GiftVoucherListOut(BaseModel):
+    items: list[GiftVoucherOut]
+    total: int
+
+
 class GiftVoucherIssueRequest(BaseModel):
     faceValue: Decimal
     issuedToName: str | None = None

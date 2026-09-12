@@ -17,13 +17,20 @@ from app.models import (
     OutboxEvent,
     PhysicalCount,
     Product,
+    PurchaseReturn,
+    PurchaseReturnLine,
     StockMovement,
     Supplier,
     User,
     balance_for,
     next_value,
 )
-from app.schemas.inventory import AdjustmentSubmitRequest, CountSubmitRequest, GRNCreateRequest
+from app.schemas.inventory import (
+    AdjustmentSubmitRequest,
+    CountSubmitRequest,
+    GRNCreateRequest,
+    PurchaseReturnCreateRequest,
+)
 
 ZERO = Decimal("0")
 
@@ -37,13 +44,17 @@ async def balance(product_id: str, location_id: str | None = None) -> Decimal:
     return await balance_for(product_id, location_id)
 
 
-async def list_movements(product_id: str | None = None, location_id: str | None = None) -> list[StockMovement]:
+async def list_movements(
+    product_id: str | None, location_id: str | None, limit: int, offset: int
+) -> tuple[list[StockMovement], int]:
     qs = StockMovement.all()
     if product_id:
         qs = qs.filter(product_id=product_id)
     if location_id:
         qs = qs.filter(location_id=location_id)
-    return await qs.order_by("-at")
+    total = await qs.count()
+    movements = await qs.order_by("-at").offset(offset).limit(limit)
+    return movements, total
 
 
 @atomic()
@@ -111,11 +122,86 @@ async def receive_grn(user: User, payload: GRNCreateRequest) -> GRN:
     return grn
 
 
-async def list_batches(product_id: str | None = None) -> list[Batch]:
+async def list_batches(product_id: str | None, limit: int, offset: int) -> tuple[list[Batch], int]:
     qs = Batch.all()
     if product_id:
         qs = qs.filter(product_id=product_id)
-    return await qs.order_by("expiry")
+    total = await qs.count()
+    batches = await qs.order_by("expiry").offset(offset).limit(limit)
+    return batches, total
+
+
+async def list_grns(limit: int, offset: int) -> tuple[list[GRN], int]:
+    """Branch-wide, not terminal-scoped — the read path Receiving.tsx's recent-GRNs
+    list needs instead of each browser's own local journal."""
+    qs = GRN.all()
+    total = await qs.count()
+    grns = await qs.order_by("-at").offset(offset).limit(limit).prefetch_related("lines")
+    return grns, total
+
+
+PURCHASE_RETURN_REASONS = ("damaged", "expired", "wrong-item", "overstock", "other")
+
+
+@atomic()
+async def create_purchase_return(user: User, payload: PurchaseReturnCreateRequest) -> PurchaseReturn:
+    if payload.reason not in PURCHASE_RETURN_REASONS:
+        raise InventoryError(f"Invalid reason {payload.reason}")
+    supplier = await Supplier.get_or_none(id=payload.supplierId)
+    if not supplier:
+        raise InventoryError(f"Unknown supplier {payload.supplierId}")
+    location = await Location.get_or_none(id=payload.locationId)
+    if not location:
+        raise InventoryError(f"Unknown location {payload.locationId}")
+    grn = None
+    if payload.grnId:
+        grn = await GRN.get_or_none(id=payload.grnId)
+        if not grn:
+            raise InventoryError(f"Unknown GRN {payload.grnId}")
+    if not payload.lines:
+        raise InventoryError("A purchase return needs at least one line")
+
+    products: dict[str, Product] = {}
+    for line in payload.lines:
+        product = await Product.get_or_none(id=line.productId)
+        if not product:
+            raise InventoryError(f"Unknown product {line.productId}")
+        products[line.productId] = product
+
+    seq = await next_value("purchase_return", 1)
+    ret = await PurchaseReturn.create(
+        return_number=f"PR-{seq:04d}", supplier=supplier, location=location, grn=grn,
+        reason=payload.reason, notes=payload.notes or None, submitted_by=user,
+    )
+
+    for line in payload.lines:
+        product = products[line.productId]
+        await PurchaseReturnLine.create(
+            purchase_return=ret, product=product, qty=line.qty, unit_price=line.unitPrice,
+        )
+        # Stock going out to the supplier — same ledger, negative qty, mirroring how a sale's
+        # own "sell" movement is posted. No stock-on-hand check: the rest of this system (sales
+        # included) already allows a balance to go negative rather than blocking on it.
+        await StockMovement.create(
+            product=product, location=location, kind="purchase-return",
+            qty=-line.qty, origin_user=user, at=datetime.now(timezone.utc),
+        )
+
+    await OutboxEvent.create(
+        aggregate_type="PurchaseReturn", aggregate_id=str(ret.id),
+        payload={"returnNumber": ret.return_number, "supplierId": payload.supplierId},
+        origin_user_id=str(user.id), origin_device_id=get_device_id(),
+    )
+    await ret.fetch_related("lines")
+    return ret
+
+
+async def list_purchase_returns(limit: int, offset: int) -> tuple[list[PurchaseReturn], int]:
+    """Branch-wide — the read path a Purchase Returns screen needs, same shape as GRNs."""
+    qs = PurchaseReturn.all()
+    total = await qs.count()
+    returns = await qs.order_by("-at").offset(offset).limit(limit).prefetch_related("lines")
+    return returns, total
 
 
 @atomic()
@@ -137,6 +223,15 @@ async def submit_count(user: User, payload: CountSubmitRequest) -> PhysicalCount
         origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return count
+
+
+async def list_counts(limit: int, offset: int) -> tuple[list[PhysicalCount], int]:
+    """Branch-wide, not terminal-scoped — the read path Counts.tsx, the Approvals Inbox and
+    Reports' Staff & Work need instead of each browser's own local journal."""
+    qs = PhysicalCount.all()
+    total = await qs.count()
+    counts = await qs.order_by("-at").offset(offset).limit(limit)
+    return counts, total
 
 
 @atomic()
@@ -181,6 +276,15 @@ async def submit_adjustment(user: User, payload: AdjustmentSubmitRequest) -> Adj
         origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return adjustment
+
+
+async def list_adjustments(limit: int, offset: int) -> tuple[list[Adjustment], int]:
+    """Branch-wide, not terminal-scoped — the read path Adjustments.tsx, the Approvals Inbox
+    and Reports' Staff & Work need instead of each browser's own local journal."""
+    qs = Adjustment.all()
+    total = await qs.count()
+    adjustments = await qs.order_by("-at").offset(offset).limit(limit)
+    return adjustments, total
 
 
 @atomic()

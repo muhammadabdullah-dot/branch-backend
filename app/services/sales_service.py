@@ -63,6 +63,21 @@ def _line_gross(line, unit_price: Decimal) -> Decimal:
 
 @atomic()
 async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
+    # Idempotent replay: checked FIRST, before any other validation or side effect, so a
+    # retried request (lost response, double-click) returns the already-committed sale instead
+    # of re-running credit-limit checks, re-posting stock movements, or re-redeeming a voucher.
+    # Note: this closes the common case (a delayed/lost-response retry after the first request
+    # already committed) but not a true simultaneous double-fire — two requests with the same
+    # key landing in the same instant could both pass this check before either commits, and the
+    # second would then fail on the column's unique constraint rather than returning the first
+    # sale gracefully. Acceptable for now (a single till/cashier submitting sequentially can't
+    # produce that race; only a client bug firing the exact same request twice in parallel could).
+    if payload.clientRequestId:
+        existing = await SaleRecord.get_or_none(client_request_id=payload.clientRequestId)
+        if existing:
+            await existing.fetch_related("lines__product", "tenders", "party", "cashier", "discount_override_by")
+            return existing
+
     if not payload.lines:
         raise SaleError("A sale needs at least one line")
     if not await TillSession.get_or_none(status="open"):
@@ -149,6 +164,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
         cash_back=cash_back,
         is_credit_sale=is_credit_sale,
         fbr_invoice_number=fbr_invoice_number,
+        client_request_id=payload.clientRequestId,
     )
 
     location = await Location.get(id=DEFAULT_LOCATION_ID)
@@ -195,3 +211,23 @@ async def find_by_invoice(invoice_number: str) -> SaleRecord | None:
     if sale:
         await sale.fetch_related("lines__product", "tenders", "party", "cashier", "discount_override_by")
     return sale
+
+
+async def list_sales(
+    from_at: datetime | None, to_at: datetime | None, limit: int, offset: int
+) -> tuple[list[SaleRecord], int]:
+    """Branch-wide, not terminal-scoped — the read path X/Z, the Dashboard and Reports need
+    instead of each browser's own local sales journal."""
+    qs = SaleRecord.all()
+    if from_at:
+        qs = qs.filter(at__gte=from_at)
+    if to_at:
+        qs = qs.filter(at__lte=to_at)
+    total = await qs.count()
+    sales = (
+        await qs.order_by("-at")
+        .offset(offset)
+        .limit(limit)
+        .prefetch_related("lines__product", "tenders", "party", "cashier", "discount_override_by")
+    )
+    return sales, total

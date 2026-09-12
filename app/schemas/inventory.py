@@ -23,6 +23,11 @@ class StockMovementOut(BaseModel):
     at: datetime
 
 
+class StockMovementListOut(BaseModel):
+    items: list[StockMovementOut]
+    total: int
+
+
 class GRNLineIn(BaseModel):
     productId: str
     qty: Decimal
@@ -66,12 +71,63 @@ class GRNOut(BaseModel):
     lines: list[GRNLineOut]
 
 
+class GRNListOut(BaseModel):
+    items: list[GRNOut]
+    total: int
+
+
+class PurchaseReturnLineIn(BaseModel):
+    productId: str
+    qty: Decimal
+    unitPrice: Decimal
+
+
+class PurchaseReturnCreateRequest(BaseModel):
+    supplierId: str
+    locationId: str
+    # Optional — a return can reference the GRN it came from, but isn't required to (e.g. old
+    # or expired stock being returned long after receiving, or stock never tied to one GRN).
+    grnId: str | None = None
+    reason: str = "other"
+    notes: str = ""
+    lines: list[PurchaseReturnLineIn]
+
+
+class PurchaseReturnLineOut(BaseModel):
+    productId: str
+    qty: Qty
+    unitPrice: Money
+
+
+class PurchaseReturnOut(BaseModel):
+    id: str
+    returnNumber: str
+    supplierId: str
+    locationId: str
+    grnId: str | None = None
+    reason: str
+    notes: str | None = None
+    submittedByUserId: str
+    at: datetime
+    lines: list[PurchaseReturnLineOut]
+
+
+class PurchaseReturnListOut(BaseModel):
+    items: list[PurchaseReturnOut]
+    total: int
+
+
 class BatchOut(BaseModel):
     id: str
     productId: str
     lotNumber: str | None = None
     expiry: datetime | None = None
     receivedQty: Qty
+
+
+class BatchListOut(BaseModel):
+    items: list[BatchOut]
+    total: int
 
 
 class CountSubmitRequest(BaseModel):
@@ -90,6 +146,11 @@ class CountOut(BaseModel):
     countedByUserId: str
     approvedByUserId: str | None = None
     at: datetime
+
+
+class CountListOut(BaseModel):
+    items: list[CountOut]
+    total: int
 
 
 class AdjustmentSubmitRequest(BaseModel):
@@ -111,6 +172,11 @@ class AdjustmentOut(BaseModel):
     submittedByUserId: str
     decidedByUserId: str | None = None
     at: datetime
+
+
+class AdjustmentListOut(BaseModel):
+    items: list[AdjustmentOut]
+    total: int
 
 
 class TransferLineOut(BaseModel):

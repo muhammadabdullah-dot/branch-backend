@@ -25,6 +25,11 @@ class SaleRecord(models.Model):
     cash_back = fields.DecimalField(max_digits=12, decimal_places=2, default=0)
     is_credit_sale = fields.BooleanField(default=False)
     fbr_invoice_number = fields.CharField(max_length=30)
+    # Client-generated idempotency key (contracts.md's architecture-doc gap, found live
+    # 2026-09-12: a lost response + a still-enabled retry button could double-submit a sale —
+    # double stock deduction, double credit-balance increment, double voucher redemption).
+    # Optional/nullable: a caller that doesn't send one gets the old, non-idempotent behavior.
+    client_request_id = fields.CharField(max_length=80, null=True, unique=True)
 
     class Meta:
         table = "sale_records"

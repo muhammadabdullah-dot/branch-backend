@@ -4,8 +4,20 @@ from decimal import Decimal
 from tortoise.transactions import atomic
 
 from app.core.device_context import get_device_id
-from app.models import Location, OutboxEvent, Product, ReturnLine, ReturnRecord, SaleRecord, StockMovement, TillSession, User
+from app.models import (
+    Location,
+    OutboxEvent,
+    Product,
+    ReturnLine,
+    ReturnRecord,
+    SaleLine,
+    SaleRecord,
+    StockMovement,
+    TillSession,
+    User,
+)
 from app.schemas.sales import ReturnCreateRequest
+from app.schemas.types import money_str
 
 DEFAULT_LOCATION_ID = "loc-1"
 ZERO = Decimal("0")
@@ -33,6 +45,22 @@ async def create_return(cashier: User, payload: ReturnCreateRequest) -> ReturnRe
         if not product:
             raise ReturnError(f"Unknown product {line.productId}")
         products[line.productId] = product
+
+    # Cap each line at what's actually still returnable — found live 2026-09-12: nothing
+    # previously checked this, so the same invoice could be refunded and re-stocked an
+    # unlimited number of times, up to the original quantity, on every repeated attempt.
+    for line in payload.lines:
+        sold_lines = await SaleLine.filter(sale_id=sale.id, product_id=line.productId, is_return=False)
+        sold_qty = sum((sl.qty for sl in sold_lines), ZERO)
+        already_returned = await ReturnLine.filter(return_record__against_id=sale.id, product_id=line.productId)
+        already_returned_qty = sum((rl.qty for rl in already_returned), ZERO)
+        remaining = sold_qty - already_returned_qty
+        if line.qty > remaining:
+            raise ReturnError(
+                f"Cannot return {money_str(line.qty)} of {products[line.productId].name} against "
+                f"{sale.invoice_number} — only {money_str(remaining)} remains returnable "
+                f"({money_str(already_returned_qty)} already returned of {money_str(sold_qty)} sold)"
+            )
 
     refund_total = sum((l.qty * l.unitPrice for l in payload.lines), ZERO)
 

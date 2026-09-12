@@ -1,7 +1,7 @@
 from fastapi import HTTPException, status
 
 from app.models import GiftVoucher
-from app.schemas.gift_vouchers import GiftVoucherIssueRequest, GiftVoucherOut, GiftVoucherRedeemRequest
+from app.schemas.gift_vouchers import GiftVoucherIssueRequest, GiftVoucherListOut, GiftVoucherOut, GiftVoucherRedeemRequest
 from app.services import gift_voucher_service
 
 
@@ -17,6 +17,13 @@ async def find(code: str) -> GiftVoucherOut:
     if not voucher:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Voucher not found")
     return _to_out(voucher)
+
+
+async def list_all(limit: int, offset: int) -> GiftVoucherListOut:
+    limit = min(max(limit, 1), 500)
+    offset = max(offset, 0)
+    vouchers, total = await gift_voucher_service.list_all(limit, offset)
+    return GiftVoucherListOut(items=[_to_out(v) for v in vouchers], total=total)
 
 
 async def issue(data: GiftVoucherIssueRequest) -> GiftVoucherOut:

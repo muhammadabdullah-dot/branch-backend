@@ -1,7 +1,9 @@
-from fastapi import APIRouter, Depends
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, Query
 
 from app.controllers import till_controller
-from app.middlewares.auth import require_permission
+from app.middlewares.auth import require_any_permission, require_permission
 from app.models import User
 from app.schemas.till import (
     CashMovementOut,
@@ -11,12 +13,16 @@ from app.schemas.till import (
     TillCloseRequest,
     TillCurrentOut,
     TillOpenRequest,
+    TillSessionListOut,
 )
 
 router = APIRouter(prefix="/till", tags=["till"])
 
 _read = require_permission("store.till", "R")
 _write = require_permission("store.till", "W")
+# X/Z's Day Close tab and Reports' Staff & Work — neither implies store.till itself (a Sales
+# Manager reading X/Z, or an Inventory Manager reading Reports, may legitimately lack it).
+_sessions_read = require_any_permission(("store.xz", "R"), ("reports", "R"))
 
 
 @router.get("/current", response_model=TillCurrentOut)
@@ -47,3 +53,14 @@ async def preview_close(user: User = Depends(_read)) -> TillClosePreviewOut:
 @router.post("/close", response_model=TillCloseOut)
 async def close(payload: TillCloseRequest, user: User = Depends(_write)) -> TillCloseOut:
     return await till_controller.close(user, payload)
+
+
+@router.get("/sessions", response_model=TillSessionListOut)
+async def list_sessions(
+    from_: datetime | None = Query(None, alias="from"),
+    to: datetime | None = None,
+    limit: int = 200,
+    offset: int = 0,
+    user: User = Depends(_sessions_read),
+) -> TillSessionListOut:
+    return await till_controller.list_sessions(from_, to, limit, offset)

@@ -18,7 +18,7 @@ from app.routes.rbac import users_router
 from app.routes.sales import router as sales_router
 from app.routes.suppliers import router as suppliers_router
 from app.routes.till import router as till_router
-from app.services.seed_service import seed_if_empty
+from app.services.seed_service import seed_if_empty, sync_role_resource_grants
 
 app = FastAPI(title=settings.app_name)
 
@@ -51,6 +51,7 @@ register_tortoise(app, config=TORTOISE_ORM, generate_schemas=False, add_exceptio
 @app.on_event("startup")
 async def _seed() -> None:
     await seed_if_empty()
+    await sync_role_resource_grants()
 
 
 @app.on_event("startup")

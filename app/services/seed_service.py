@@ -189,3 +189,19 @@ async def seed_if_empty() -> None:
                 can_execute=template.can_execute,
                 granted_by=None,
             )
+
+
+async def sync_role_resource_grants() -> None:
+    """Backfills any resource added to `core/resources.py` (and therefore to a role's template)
+    onto every existing user of that role. Without this, a resource added after a user was
+    seeded would never reach them — RoleDefaultPermission templates only materialize into real
+    UserPermission rows at User.create() time, per contracts.md's own documented limitation.
+    Runs on every startup; additive only — never touches a permission a Branch Manager has
+    already hand-edited, only adds ones missing entirely."""
+    for user in await User.all():
+        template_resources = resources_for_role(user.role_id)
+        granted = set(await UserPermission.filter(user=user).values_list("resource", flat=True))
+        for resource in template_resources - granted:
+            await UserPermission.create(
+                user=user, resource=resource, can_read=True, can_write=True, can_execute=True, granted_by=None,
+            )

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import HTTPException, status
 
 from app.models import PaymentMethod, SaleRecord, User
@@ -5,6 +7,7 @@ from app.schemas.sales import (
     NextInvoiceNumberOut,
     SaleCreateRequest,
     SaleLineOut,
+    SaleListOut,
     SaleRecordOut,
     SaleTenderOut,
 )
@@ -50,3 +53,10 @@ async def get_by_invoice(invoice_number: str) -> SaleRecordOut:
     if not sale:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sale not found")
     return await _sale_out(sale)
+
+
+async def list_sales(from_at: datetime | None, to_at: datetime | None, limit: int, offset: int) -> SaleListOut:
+    limit = min(max(limit, 1), 500)
+    offset = max(offset, 0)
+    sales, total = await sales_service.list_sales(from_at, to_at, limit, offset)
+    return SaleListOut(items=[await _sale_out(s) for s in sales], total=total)

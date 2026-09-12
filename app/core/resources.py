@@ -17,6 +17,7 @@ RESOURCES: list[str] = [
     "inventory.catalog",
     "inventory.suppliers",
     "inventory.receiving",
+    "inventory.purchase-returns",
     "inventory.movements",
     "inventory.batches",
     "inventory.counts",

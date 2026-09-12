@@ -16,6 +16,15 @@ async def find(code: str) -> GiftVoucher | None:
     return await GiftVoucher.get_or_none(code=code.strip().upper())
 
 
+async def list_all(limit: int, offset: int) -> tuple[list[GiftVoucher], int]:
+    """Branch-wide, not terminal-scoped — every voucher issued at any till, not just the ones
+    this browser happened to issue or look up."""
+    qs = GiftVoucher.all()
+    total = await qs.count()
+    vouchers = await qs.order_by("-issued_at").offset(offset).limit(limit)
+    return vouchers, total
+
+
 @atomic()
 async def issue(face_value: Decimal, issued_to_name: str | None) -> GiftVoucher:
     code = f"GV-{random.randint(10000, 99999)}"

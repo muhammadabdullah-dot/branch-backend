@@ -22,6 +22,9 @@ class SaleCreateRequest(BaseModel):
     tenders: dict[str, Decimal]
     voucherCode: str | None = None
     discountOverrideByUserId: str | None = None
+    # Optional client-generated idempotency key — a retried request with the same key returns
+    # the already-committed sale instead of creating a second one. Omit for the old behavior.
+    clientRequestId: str | None = None
 
 
 class SaleLineOut(BaseModel):
@@ -84,3 +87,8 @@ class ReturnRecordOut(BaseModel):
 
 class NextInvoiceNumberOut(BaseModel):
     invoiceNumber: str
+
+
+class SaleListOut(BaseModel):
+    items: list[SaleRecordOut]
+    total: int

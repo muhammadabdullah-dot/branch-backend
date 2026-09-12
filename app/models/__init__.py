@@ -8,6 +8,7 @@ from app.models.inventory import StockMovement, balance_for
 from app.models.location import Location
 from app.models.party import Party
 from app.models.permission import UserPermission
+from app.models.purchase_return import PurchaseReturn, PurchaseReturnLine
 from app.models.role import Role, RoleDefaultPermission
 from app.models.sales import ReturnLine, ReturnRecord, SaleLine, SaleRecord, SaleTender
 from app.models.sequence import Counter, next_value
@@ -46,6 +47,8 @@ __all__ = [
     "GRNLine",
     "PhysicalCount",
     "Adjustment",
+    "PurchaseReturn",
+    "PurchaseReturnLine",
     "Transfer",
     "TransferLine",
     "Counter",

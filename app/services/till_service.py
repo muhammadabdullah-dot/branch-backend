@@ -130,3 +130,18 @@ async def close_till(user: User, counted_denominations: dict[str, int]) -> dict:
         origin_user_id=str(user.id), origin_device_id=get_device_id(),
     )
     return {**breakdown, "sessionNumber": till.session_number, "countedCash": counted_cash, "variance": variance}
+
+
+async def list_closed_sessions(
+    from_at: datetime | None, to_at: datetime | None, limit: int, offset: int
+) -> tuple[list[TillSession], int]:
+    """Branch-wide closed sessions — the read path X/Z's Day Close and Reports' Staff & Work
+    need instead of each browser's own local terminal journal."""
+    qs = TillSession.filter(status="closed")
+    if from_at:
+        qs = qs.filter(closed_at__gte=from_at)
+    if to_at:
+        qs = qs.filter(closed_at__lte=to_at)
+    total = await qs.count()
+    sessions = await qs.order_by("-closed_at").offset(offset).limit(limit).prefetch_related("opened_by")
+    return sessions, total
