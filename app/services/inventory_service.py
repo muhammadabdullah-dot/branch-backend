@@ -5,6 +5,7 @@ StockMovement table I3's Sales/Returns already write to.
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from tortoise import Tortoise
 from tortoise.transactions import atomic
 
 from app.core.device_context import get_device_id
@@ -42,6 +43,38 @@ class InventoryError(Exception):
 
 async def balance(product_id: str, location_id: str | None = None) -> Decimal:
     return await balance_for(product_id, location_id)
+
+
+_STOCK_VALUE_SQL = """
+SELECT COUNT(*) AS lines,
+       COALESCE(SUM(b.qty), 0) AS total_qty,
+       COALESCE(SUM(b.qty * p.price), 0) AS value_at_sale,
+       COALESCE(SUM(b.qty * COALESCE(p.avg_cost, 0)), 0) AS value_at_cost
+FROM (
+    SELECT product_id, location_id, SUM(qty) AS qty
+    FROM stock_movements
+    GROUP BY product_id, location_id
+    HAVING SUM(qty) != 0
+) b
+JOIN products p ON p.id = b.product_id
+"""
+
+
+async def stock_value() -> dict[str, Decimal | int]:
+    """Branch-wide stock valuation, folded in SQL across the whole ledger and the whole catalog.
+
+    It has to be computed here: valuation needs every Item's price, and no client holds the
+    catalog — it runs to tens of thousands of rows and is only ever fetched a page at a time.
+    A client summing what it happens to have cached reports a fraction of the real figure and
+    gives no hint that it did."""
+    rows = await Tortoise.get_connection("default").execute_query_dict(_STOCK_VALUE_SQL)
+    row = rows[0] if rows else {}
+    return {
+        "lines": int(row.get("lines") or 0),
+        "totalQty": Decimal(str(row.get("total_qty") or 0)),
+        "valueAtSale": Decimal(str(row.get("value_at_sale") or 0)),
+        "valueAtCost": Decimal(str(row.get("value_at_cost") or 0)),
+    }
 
 
 async def list_movements(

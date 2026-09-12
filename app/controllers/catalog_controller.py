@@ -14,8 +14,8 @@ def _to_out(p: Product, include_aliases: bool = False) -> ProductOut:
     )
 
 
-async def list_all(q: str | None, limit: int, offset: int) -> ProductListOut:
-    items, total = await catalog_service.list_all(q, limit, offset)
+async def list_all(q: str | None, limit: int, offset: int, ids: list[str] | None = None) -> ProductListOut:
+    items, total = await catalog_service.list_all(q, limit, offset, ids)
     return ProductListOut(items=[_to_out(p, include_aliases=True) for p in items], total=total)
 
 

@@ -6,7 +6,7 @@ Idempotent — a no-op if roles already exist, so it's safe to run on every star
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from app.core.resources import resources_for_role
+from app.core.resources import ROLE_TEMPLATES, excluded_resources_for_role, resources_for_role
 from app.core.security import hash_password
 from app.models import (
     Batch,
@@ -196,8 +196,13 @@ async def sync_role_resource_grants() -> None:
     onto every existing user of that role. Without this, a resource added after a user was
     seeded would never reach them — RoleDefaultPermission templates only materialize into real
     UserPermission rows at User.create() time, per contracts.md's own documented limitation.
-    Runs on every startup; additive only — never touches a permission a Branch Manager has
-    already hand-edited, only adds ones missing entirely."""
+    Runs on every startup.
+
+    Additive for ordinary grants — never touches a permission a Branch Manager has hand-edited,
+    only adds ones missing entirely. The one thing it *does* remove is a resource the role
+    template explicitly excludes (`resources.py`'s `exclude`), because that's a standing policy
+    ("a Cashier must never hold discount-override authority"), not a per-user customization
+    someone might legitimately have made."""
     for user in await User.all():
         template_resources = resources_for_role(user.role_id)
         granted = set(await UserPermission.filter(user=user).values_list("resource", flat=True))
@@ -205,3 +210,13 @@ async def sync_role_resource_grants() -> None:
             await UserPermission.create(
                 user=user, resource=resource, can_read=True, can_write=True, can_execute=True, granted_by=None,
             )
+        excluded = excluded_resources_for_role(user.role_id)
+        if excluded:
+            await UserPermission.filter(user=user, resource__in=list(excluded)).delete()
+
+    # The role's own template rows feed every *future* user created into that role, so a stale
+    # row here would silently re-grant an excluded resource to the next hire.
+    for role_id in ROLE_TEMPLATES:
+        excluded = excluded_resources_for_role(role_id)
+        if excluded:
+            await RoleDefaultPermission.filter(role_id=role_id, resource__in=list(excluded)).delete()

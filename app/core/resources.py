@@ -41,18 +41,33 @@ def _matches(resource: str, prefix: str) -> bool:
     return resource == prefix or resource.startswith(prefix + ".")
 
 
-# role slug -> module prefixes it holds today (frontend-baseline.md §1.1), plus any explicit extra grant.
+# role slug -> module prefixes it holds today (frontend-baseline.md §1.1), plus any explicit extra
+# grant, minus any resource the role must never hold even though a prefix would otherwise cover it.
+#
+# `exclude` is a policy statement, not a preference: a Cashier inherits all of `store.*`, but
+# `store.discount-override` is the one authority the whole above-authority-discount flow depends on
+# NOT being self-serve — if the cashier ringing the sale can approve it, the F9 manager sign-in is
+# theatre. Sales Manager is the approver; Cashier is the one who needs approving.
 ROLE_TEMPLATES: dict[str, dict[str, list[str]]] = {
-    "cashier": {"prefixes": ["store"], "extra": []},
-    "sales-manager": {"prefixes": ["store"], "extra": []},
-    "stock-keeper": {"prefixes": ["inventory"], "extra": []},
-    "inventory-manager": {"prefixes": ["inventory", "reports"], "extra": []},
-    "branch-manager": {"prefixes": ["branch-console", "reports"], "extra": []},
+    "cashier": {"prefixes": ["store"], "extra": [], "exclude": ["store.discount-override"]},
+    "sales-manager": {"prefixes": ["store"], "extra": [], "exclude": []},
+    "stock-keeper": {"prefixes": ["inventory"], "extra": [], "exclude": []},
+    "inventory-manager": {"prefixes": ["inventory", "reports"], "extra": [], "exclude": []},
+    "branch-manager": {"prefixes": ["branch-console", "reports"], "extra": [], "exclude": []},
 }
+
+_EMPTY_TEMPLATE: dict[str, list[str]] = {"prefixes": [], "extra": [], "exclude": []}
 
 
 def resources_for_role(role_id: str) -> set[str]:
-    template = ROLE_TEMPLATES.get(role_id, {"prefixes": [], "extra": []})
+    template = ROLE_TEMPLATES.get(role_id, _EMPTY_TEMPLATE)
     granted = {r for r in RESOURCES if any(_matches(r, p) for p in template["prefixes"])}
-    granted.update(template["extra"])
+    granted.update(template.get("extra", []))
+    granted.difference_update(template.get("exclude", []))
     return granted
+
+
+def excluded_resources_for_role(role_id: str) -> set[str]:
+    """Resources this role must never hold — enforced on every startup, unlike ordinary grants
+    which a Branch Manager is free to customize per user."""
+    return set(ROLE_TEMPLATES.get(role_id, _EMPTY_TEMPLATE).get("exclude", []))

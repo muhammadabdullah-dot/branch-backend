@@ -20,14 +20,21 @@ from app.schemas.inventory import (
     PurchaseReturnListOut,
     PurchaseReturnOut,
     StockMovementListOut,
+    StockValueOut,
     TransferOut,
 )
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 
 _read = require_permission("inventory.overview", "R")
-_movements_read = require_permission("inventory.movements", "R")
-_batches_read = require_permission("inventory.batches", "R")
+# Reports reaches for this too — a Branch Manager holds `reports` but not `inventory.*`.
+_stock_value_read = require_any_permission(("inventory.overview", "R"), ("reports", "R"))
+# Read-only ledger views. `reports` gets in because the Branch Manager's own Dashboard and the
+# Reports screen are built on exactly this data — without it, the manager's stock-health panel
+# reads "your access doesn't include stock levels" on the one screen meant to show it. Nothing
+# here writes; every write above stays on its own inventory.* permission.
+_movements_read = require_any_permission(("inventory.movements", "R"), ("reports", "R"))
+_batches_read = require_any_permission(("inventory.batches", "R"), ("reports", "R"))
 _receive = require_permission("inventory.receiving", "W")
 _grns_read = require_permission("inventory.receiving", "R")
 _purchase_returns_write = require_permission("inventory.purchase-returns", "W")
@@ -52,6 +59,11 @@ _adjustments_list_read = require_any_permission(
 @router.get("/balance", response_model=BalanceOut)
 async def balance(productId: str, locationId: str | None = None, user: User = Depends(_read)) -> BalanceOut:
     return await inventory_controller.get_balance(productId, locationId)
+
+
+@router.get("/stock-value", response_model=StockValueOut)
+async def stock_value(user: User = Depends(_stock_value_read)) -> StockValueOut:
+    return await inventory_controller.get_stock_value()
 
 
 @router.get("/movements", response_model=StockMovementListOut)

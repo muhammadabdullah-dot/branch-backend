@@ -24,12 +24,18 @@ def _to_model_fields(data: dict) -> dict:
     return {_FIELD_MAP.get(k, k): v for k, v in data.items() if k != "sku"}
 
 
-async def list_all(q: str | None, limit: int, offset: int) -> tuple[list[Product], int]:
+async def list_all(q: str | None, limit: int, offset: int, ids: list[str] | None = None) -> tuple[list[Product], int]:
     """Paginated + searchable — a real catalog runs into the tens of thousands of rows (this was
     built against a 47k-row real export), so 'fetch everything' isn't just slow, it's structurally
     broken: SQLite errors on 'too many SQL variables' prefetching a reverse relation for that many
-    parent rows in one IN(...) clause. Bounded pages sidestep that entirely."""
+    parent rows in one IN(...) clause. Bounded pages sidestep that entirely.
+
+    `ids` resolves a known set of products in one call — what a caller holding product *ids*
+    (a recalled held bill, say) needs, since neither search nor the code lookup can find a row
+    by its id."""
     qs = Product.all()
+    if ids:
+        qs = qs.filter(id__in=ids)
     if q:
         qs = qs.filter(Q(name__icontains=q) | Q(sku__icontains=q) | Q(barcode__icontains=q))
     total = await qs.count()

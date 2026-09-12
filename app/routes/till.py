@@ -20,13 +20,16 @@ router = APIRouter(prefix="/till", tags=["till"])
 
 _read = require_permission("store.till", "R")
 _write = require_permission("store.till", "W")
+# Whether a Till is open, and which, is a branch-oversight fact as much as a counter one —
+# the Branch Dashboard leads with it. Read-only; opening/closing still needs store.till:W.
+_current_read = require_any_permission(("store.till", "R"), ("branch-console.dashboard", "R"))
 # X/Z's Day Close tab and Reports' Staff & Work — neither implies store.till itself (a Sales
 # Manager reading X/Z, or an Inventory Manager reading Reports, may legitimately lack it).
 _sessions_read = require_any_permission(("store.xz", "R"), ("reports", "R"))
 
 
 @router.get("/current", response_model=TillCurrentOut)
-async def current(user: User = Depends(_read)) -> TillCurrentOut:
+async def current(user: User = Depends(_current_read)) -> TillCurrentOut:
     return await till_controller.current()
 
 

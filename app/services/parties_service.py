@@ -1,5 +1,7 @@
 from decimal import Decimal, InvalidOperation
 
+from tortoise.expressions import Q
+
 from app.models import Party, next_value
 from app.schemas.import_result import ImportRowError, ImportSummary
 from app.schemas.parties import PartyCreate, PartyUpdate
@@ -20,21 +22,39 @@ def _to_model_fields(data: dict) -> dict:
     return {_FIELD_MAP.get(k, k): v for k, v in data.items()}
 
 
+SEARCH_LIMIT = 50
+LIST_LIMIT = 500
+
+
 async def find_by_query(q: str) -> list[Party]:
-    query = q.strip().upper()
+    """Party code, loyalty number, phone, or name.
+
+    Name matching matters: someone attaching a customer at the counter usually knows the name,
+    not the six-character code — without it, typing "Ali Traders" found nothing at all. And the
+    filtering happens in the database rather than by pulling every active Party into Python and
+    looping, which was a full table scan on each lookup.
+
+    Exact code/loyalty hits sort first, because Billing takes the first result as *the* match.
+    """
+    query = q.strip()
+    if not query:
+        return []
     digits = "".join(ch for ch in query if ch.isdigit())
-    candidates = await Party.filter(active=True, is_walk_in=False)
-    hits = []
-    for p in candidates:
-        if p.code.upper() == query or (p.loyalty_no or "").upper() == query:
-            hits.append(p)
-        elif len(digits) >= 7 and (p.phone or "").replace("-", "").endswith(digits):
-            hits.append(p)
+    predicate = Q(code__iexact=query) | Q(loyalty_no__iexact=query) | Q(name__icontains=query)
+    if len(digits) >= 7:
+        # Match on the last 7 digits so a stored "0300-1234567" is found by either the bare
+        # number or the full dialled form, whichever the staff typed.
+        predicate |= Q(phone__endswith=digits[-7:])
+    hits = await Party.filter(Q(active=True, is_walk_in=False) & predicate).limit(SEARCH_LIMIT)
+    upper = query.upper()
+    hits.sort(key=lambda p: 0 if p.code.upper() == upper or (p.loyalty_no or "").upper() == upper else 1)
     return hits
 
 
 async def list_all() -> list[Party]:
-    return await Party.filter(active=True)
+    """Bounded — a real branch's Party master is not something a screen should ever pull whole.
+    Callers that need to find one Party pass `q` (see find_by_query) rather than paging this."""
+    return await Party.filter(active=True).order_by("name").limit(LIST_LIMIT)
 
 
 async def create(data: PartyCreate) -> Party:

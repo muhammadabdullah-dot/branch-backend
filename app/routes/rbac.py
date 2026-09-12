@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends
 
 from app.controllers import rbac_controller
 from app.core.resources import RBAC_MANAGEMENT_RESOURCE
-from app.middlewares.auth import require_permission
+from app.middlewares.auth import get_current_user, require_permission
 from app.models import User
 from app.schemas.auth import PermissionOut
-from app.schemas.rbac import UpdatePermissionsRequest, UserSummaryOut
+from app.schemas.rbac import UpdatePermissionsRequest, UserNameOut, UserSummaryOut
 
 router = APIRouter(prefix="/rbac", tags=["rbac"])
 users_router = APIRouter(prefix="/users", tags=["rbac"])
@@ -22,6 +22,18 @@ async def resources(user: User = Depends(_read)) -> list[str]:
 @users_router.get("", response_model=list[UserSummaryOut])
 async def list_users(user: User = Depends(_read)) -> list[UserSummaryOut]:
     return await rbac_controller.list_users()
+
+
+@users_router.get("/names", response_model=list[UserNameOut])
+async def list_user_names(user: User = Depends(get_current_user)) -> list[UserNameOut]:
+    """Id → display name for every ledger row that records who did something.
+
+    Any signed-in user, deliberately: the full `GET /users` above is gated on staff-access
+    because it carries emails and roles, but *names* are what every Movements, Counts,
+    Adjustments and Till row needs to be readable at all. Gating those behind an admin
+    permission is why a Stock Keeper's own ledger showed rows filed under "User d400a6f3".
+    """
+    return await rbac_controller.list_user_names()
 
 
 @users_router.get("/{user_id}/permissions", response_model=list[PermissionOut])

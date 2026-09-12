@@ -12,9 +12,19 @@ class BalanceOut(BaseModel):
     balance: Qty
 
 
+class StockValueOut(BaseModel):
+    """Whole-branch stock valuation — the client can't fold this itself without the whole catalog."""
+    lines: int
+    totalQty: Qty
+    valueAtSale: Money
+    valueAtCost: Money
+
+
 class StockMovementOut(BaseModel):
     id: str
     productId: str
+    productName: str | None = None
+    productSku: str | None = None
     locationId: str
     kind: str
     qty: Qty
@@ -49,6 +59,8 @@ class GRNCreateRequest(BaseModel):
 
 class GRNLineOut(BaseModel):
     productId: str
+    productName: str | None = None
+    productSku: str | None = None
     qty: Qty
     bonusQty: Qty
     unitPrice: Money
@@ -95,6 +107,8 @@ class PurchaseReturnCreateRequest(BaseModel):
 
 class PurchaseReturnLineOut(BaseModel):
     productId: str
+    productName: str | None = None
+    productSku: str | None = None
     qty: Qty
     unitPrice: Money
 
@@ -120,6 +134,8 @@ class PurchaseReturnListOut(BaseModel):
 class BatchOut(BaseModel):
     id: str
     productId: str
+    productName: str | None = None
+    productSku: str | None = None
     lotNumber: str | None = None
     expiry: datetime | None = None
     receivedQty: Qty
@@ -139,6 +155,8 @@ class CountSubmitRequest(BaseModel):
 class CountOut(BaseModel):
     id: str
     productId: str
+    productName: str | None = None
+    productSku: str | None = None
     locationId: str
     systemQty: Qty
     countedQty: Qty
@@ -164,6 +182,8 @@ class AdjustmentSubmitRequest(BaseModel):
 class AdjustmentOut(BaseModel):
     id: str
     productId: str
+    productName: str | None = None
+    productSku: str | None = None
     locationId: str
     reason: str
     magnitude: Qty
@@ -181,6 +201,8 @@ class AdjustmentListOut(BaseModel):
 
 class TransferLineOut(BaseModel):
     productId: str
+    productName: str | None = None
+    productSku: str | None = None
     qtySent: Qty
     qtyReceived: Qty | None = None
 

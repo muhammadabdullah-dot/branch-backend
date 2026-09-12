@@ -1,7 +1,7 @@
 from fastapi import HTTPException, status
 
 from app.models import User
-from app.schemas.rbac import UpdatePermissionsRequest, UserSummaryOut
+from app.schemas.rbac import UpdatePermissionsRequest, UserNameOut, UserSummaryOut
 from app.services import rbac_service
 
 
@@ -12,6 +12,10 @@ def resources() -> list[str]:
 async def list_users() -> list[UserSummaryOut]:
     users = await rbac_service.list_users()
     return [UserSummaryOut(id=str(u.id), name=u.name, email=u.email, roleId=u.role_id, active=u.active) for u in users]
+
+
+async def list_user_names() -> list[UserNameOut]:
+    return [UserNameOut(id=str(u.id), name=u.name) for u in await rbac_service.list_users()]
 
 
 async def get_permissions(user_id: str):
