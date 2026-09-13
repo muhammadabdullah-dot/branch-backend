@@ -1,7 +1,14 @@
 from fastapi import HTTPException, status
 
 from app.models import User
-from app.schemas.rbac import UpdatePermissionsRequest, UserNameOut, UserSummaryOut
+from app.schemas.rbac import (
+    RoleOut,
+    UpdatePermissionsRequest,
+    UserCreateRequest,
+    UserNameOut,
+    UserSummaryOut,
+    UserUpdateRequest,
+)
 from app.services import rbac_service
 
 
@@ -9,9 +16,44 @@ def resources() -> list[str]:
     return rbac_service.list_resources()
 
 
+def _out(u: User) -> UserSummaryOut:
+    return UserSummaryOut(id=str(u.id), name=u.name, email=u.email, roleId=u.role_id, active=u.active)
+
+
+async def list_roles() -> list[RoleOut]:
+    return [RoleOut(id=r.id, name=r.name) for r in await rbac_service.list_roles()]
+
+
+async def create_user(payload: UserCreateRequest) -> UserSummaryOut:
+    try:
+        user = await rbac_service.create_user(
+            payload.name, str(payload.email), payload.password, payload.roleId,
+        )
+    except rbac_service.RbacError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    return _out(user)
+
+
+async def update_user(user_id: str, payload: UserUpdateRequest, caller: User) -> UserSummaryOut:
+    if user_id == str(caller.id) and payload.active is False:
+        # Locking yourself out of the only account that can unlock people is a support call
+        # somebody has to drive to the branch to fix.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can't deactivate your own account.")
+    data = payload.model_dump(exclude_unset=True)
+    try:
+        user = await rbac_service.update_user(
+            user_id, name=data.get("name"), email=(str(data["email"]) if data.get("email") else None),
+            active=data.get("active"), password=data.get("password"),
+        )
+    except rbac_service.RbacError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return _out(user)
+
+
 async def list_users() -> list[UserSummaryOut]:
-    users = await rbac_service.list_users()
-    return [UserSummaryOut(id=str(u.id), name=u.name, email=u.email, roleId=u.role_id, active=u.active) for u in users]
+    return [_out(u) for u in await rbac_service.list_users()]
 
 
 async def list_user_names() -> list[UserNameOut]:

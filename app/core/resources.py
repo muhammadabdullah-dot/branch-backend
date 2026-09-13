@@ -20,6 +20,7 @@ RESOURCES: list[str] = [
     "inventory.purchase-returns",
     "inventory.movements",
     "inventory.batches",
+    "inventory.labels",
     "inventory.counts",
     "inventory.counts.approve",
     "inventory.adjustments",
@@ -30,6 +31,11 @@ RESOURCES: list[str] = [
     "branch-console.staff",
     "branch-console.staff-access",
     "branch-console.customers",
+    # Seeing how this branch is connected to head office, and pushing now rather than waiting for
+    # the next scheduled tick. Under `branch-console` so the Branch Manager picks it up from the
+    # existing prefix — the person who gets asked "is our data reaching head office?" is the
+    # person standing in the branch, and they should be able to answer without ringing anyone.
+    "branch-console.sync",
     "reports",
 ]
 

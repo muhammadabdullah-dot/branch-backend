@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 
 from app.schemas.auth import PermissionOut
 
@@ -19,3 +19,37 @@ class UserSummaryOut(BaseModel):
 
 class UpdatePermissionsRequest(BaseModel):
     permissions: list[PermissionOut]
+
+
+class RoleOut(BaseModel):
+    id: str
+    name: str
+
+
+class UserCreateRequest(BaseModel):
+    """A Branch Manager taking on a new salesperson.
+
+    The new account starts on its role's standard access and nothing else — the Branch Manager can
+    widen or narrow it afterwards on the User Access tab. Granting the role's template up front is
+    what makes a new starter able to sign in and work the same afternoon instead of waiting for
+    somebody to tick twenty boxes.
+    """
+
+    name: str = Field(min_length=1, max_length=120)
+    email: EmailStr
+    password: str = Field(min_length=6, max_length=128)
+    roleId: str
+
+
+class UserUpdateRequest(BaseModel):
+    """Everything optional — a PATCH touches only what it names. `roleId` is absent by design: a
+    role change rewrites what someone may do, and doing that silently through an edit form is how
+    a salesperson ends up able to approve their own discounts. Change access on the User Access
+    tab, where the consequence is on screen."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    email: EmailStr | None = None
+    active: bool | None = None
+    # An admin reset, not a change-your-own-password flow — that needs the old one and has no
+    # endpoint yet.
+    password: str | None = Field(default=None, min_length=6, max_length=128)

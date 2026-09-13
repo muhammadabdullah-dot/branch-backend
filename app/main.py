@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from tortoise.contrib.fastapi import register_tortoise
 
+from app.core import scheduler
 from app.core.config import TORTOISE_ORM, settings
 from app.core.network import get_lan_ip
 from app.middlewares.device import device_identity_middleware
@@ -15,10 +16,12 @@ from app.routes.inventory import router as inventory_router
 from app.routes.parties import router as parties_router
 from app.routes.rbac import router as rbac_router
 from app.routes.rbac import users_router
+from app.routes.registration import router as registration_router
+from app.routes.registration import sync_router
 from app.routes.sales import router as sales_router
 from app.routes.suppliers import router as suppliers_router
 from app.routes.till import router as till_router
-from app.services.seed_service import seed_if_empty, sync_role_resource_grants
+from app.services.seed_service import seed_if_empty, sync_role_labels, sync_role_resource_grants
 
 app = FastAPI(title=settings.app_name)
 
@@ -33,6 +36,8 @@ app.middleware("http")(device_identity_middleware)
 
 register_error_handlers(app)
 app.include_router(health_router)
+app.include_router(registration_router)
+app.include_router(sync_router)
 app.include_router(auth_router)
 app.include_router(rbac_router)
 app.include_router(users_router)
@@ -51,7 +56,22 @@ register_tortoise(app, config=TORTOISE_ORM, generate_schemas=False, add_exceptio
 @app.on_event("startup")
 async def _seed() -> None:
     await seed_if_empty()
+    await sync_role_labels()
     await sync_role_resource_grants()
+
+
+@app.on_event("startup")
+async def _start_scheduler() -> None:
+    """The sync loop belongs to the server, not to a browser tab — see app/core/scheduler.py. It
+    starts whether or not this branch is verified yet; an unverified branch simply finds nothing to
+    do and checks again shortly, which is what makes a branch start syncing the moment somebody
+    finishes typing the key in rather than after the next restart."""
+    scheduler.start()
+
+
+@app.on_event("shutdown")
+async def _stop_scheduler() -> None:
+    await scheduler.stop()
 
 
 @app.on_event("startup")

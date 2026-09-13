@@ -10,3 +10,5 @@ tzdata
 openpyxl
 xlrd
 python-multipart
+httpx
+email-validator

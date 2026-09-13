@@ -4,6 +4,7 @@ from app.models.device import Device
 from app.models.gift_voucher import GiftVoucher, VoucherRedemption
 from app.models.grn import GRN, Batch, GRNLine
 from app.models.held_bill import HeldBill
+from app.models.identity import IDENTITY_PK, BranchIdentity, SyncState
 from app.models.inventory import StockMovement, balance_for
 from app.models.location import Location
 from app.models.party import Party
@@ -19,6 +20,9 @@ from app.models.transfer import Transfer, TransferLine
 from app.models.user import User
 
 __all__ = [
+    "BranchIdentity",
+    "SyncState",
+    "IDENTITY_PK",
     "Role",
     "RoleDefaultPermission",
     "User",

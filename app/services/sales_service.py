@@ -36,12 +36,41 @@ class SaleError(Exception):
         self.message = message
 
 
+# Until this branch server has been verified it has no identity, and an invoice has to be numbered
+# something. `BR` is deliberately not a real branch's code — a bill printed before setup is a bill
+# that should be obvious as such, rather than one quietly filed under whichever branch the software
+# was written in.
+UNVERIFIED_PREFIX = "BR"
+
+
+async def invoice_prefix() -> str:
+    """This branch's own code, from the identity head office issued it.
+
+    It used to be the literal string "HO". That was the head office assumption baked into the
+    numbering: every branch in the chain would have printed bills numbered as if they were Head
+    Office, and two branches' invoice numbers would have collided the moment a second one opened.
+    A branch is a branch — its bills carry its own code.
+    """
+    from app.services import registration_service
+
+    identity = await registration_service.current()
+    return identity.code if identity else UNVERIFIED_PREFIX
+
+
 async def peek_next_invoice_number() -> str:
     from app.models import Counter
 
     counter = await Counter.get_or_none(id="invoice")
     seq = counter.value if counter else 143
-    return f"HO-2026-{seq:06d}"
+    return f"{await invoice_prefix()}-{_invoice_year()}-{seq:06d}"
+
+
+def _invoice_year() -> int:
+    """The branch's own trading year, not the server's UTC one — Pakistan is UTC+5, so a sale rung
+    at half past nine in the evening on 31 December is still last year's bill."""
+    from datetime import datetime, timedelta, timezone
+
+    return datetime.now(timezone(timedelta(hours=5))).year
 
 
 async def _resolve_party(party_id: str | None) -> Party:
@@ -128,7 +157,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
         earned_points = max(0, int((gross - disc_total) // Decimal("50")))
 
     invoice_seq = await next_value("invoice", 143)
-    invoice_number = f"HO-2026-{invoice_seq:06d}"
+    invoice_number = f"{await invoice_prefix()}-{_invoice_year()}-{invoice_seq:06d}"
     fbr_invoice_number = f"7000-{invoice_number[-8:]}"
     credit_amount = payload.tenders.get("CREDIT", ZERO)
     is_credit_sale = credit_amount > 0

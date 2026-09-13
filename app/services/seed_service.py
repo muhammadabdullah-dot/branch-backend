@@ -82,7 +82,10 @@ SEED_BATCHES = [
 ]
 
 ROLES = [
-    ("cashier", "Cashier", "/store/billing"),
+    # Display name only. The role *id* stays "cashier": it is referenced by every
+    # existing permission row, the role templates and the seeded accounts, and
+    # renaming an identifier to change a label is a migration bought for nothing.
+    ("cashier", "Salesperson", "/store/billing"),
     ("sales-manager", "Sales Manager", "/store/billing"),
     ("stock-keeper", "Stock Keeper", "/inventory/overview"),
     ("inventory-manager", "Inventory Manager", "/inventory/overview"),
@@ -90,7 +93,7 @@ ROLES = [
 ]
 
 USERS = [
-    ("cashier@branch.dmarina.pk", "cashier123", "cashier", "Cashier"),
+    ("cashier@branch.dmarina.pk", "cashier123", "cashier", "Salesperson"),
     ("salesmanager@branch.dmarina.pk", "sales123", "sales-manager", "Sales Manager"),
     ("stockkeeper@branch.dmarina.pk", "stock123", "stock-keeper", "Stock Keeper"),
     ("inventorymanager@branch.dmarina.pk", "inventory123", "inventory-manager", "Inventory Manager"),
@@ -189,6 +192,37 @@ async def seed_if_empty() -> None:
                 can_execute=template.can_execute,
                 granted_by=None,
             )
+
+
+# Seeded placeholder names that were never a real person — safe to re-label when the role is
+# renamed. A name a Branch Manager actually typed is never touched, which is why this is an exact
+# match against the old placeholders rather than a search for "Cashier" anywhere in a name.
+_RENAMED_PLACEHOLDERS = {
+    "Cashier": "Salesperson",
+    "Cashier 2": "Salesperson 2",
+    "Cashier 3": "Salesperson 3",
+}
+
+
+async def sync_role_labels() -> None:
+    """Re-apply the role display names and landing pages from ROLES on every startup.
+
+    `seed_if_empty` only ever runs on a fresh database, so without this a rename would reach new
+    installs and never reach the branch that is actually trading. Renaming a role is a label
+    change, not a migration — the role *id* is untouched, so every permission row, template and
+    account still points exactly where it did.
+    """
+    for role_id, name, landing in ROLES:
+        role = await Role.get_or_none(id=role_id)
+        if role and (role.name != name or role.landing != landing):
+            role.name, role.landing = name, landing
+            await role.save(update_fields=["name", "landing"])
+            print(f"  role '{role_id}' is now shown as '{name}'", flush=True)
+
+    for old, new in _RENAMED_PLACEHOLDERS.items():
+        renamed = await User.filter(name=old).update(name=new)
+        if renamed:
+            print(f"  renamed {renamed} seeded account(s): {old} -> {new}", flush=True)
 
 
 async def sync_role_resource_grants() -> None:
