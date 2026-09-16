@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from pydantic import BaseModel, EmailStr, Field
 
 from app.schemas.auth import PermissionOut
@@ -15,6 +17,9 @@ class UserSummaryOut(BaseModel):
     email: str
     roleId: str
     active: bool
+    title: str | None = None
+    # The most bill discount they may give, and approve for others.
+    discountLimit: str = "0"
 
 
 class UpdatePermissionsRequest(BaseModel):
@@ -38,7 +43,10 @@ class UserCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     email: EmailStr
     password: str = Field(min_length=6, max_length=128)
+    # The starting point: cashier (Salesperson) or branch-manager (everything).
     roleId: str
+    title: str | None = Field(default=None, max_length=80)
+    discountLimit: Decimal | None = Field(default=None, ge=0, le=100)
 
 
 class UserUpdateRequest(BaseModel):
@@ -53,3 +61,31 @@ class UserUpdateRequest(BaseModel):
     # An admin reset, not a change-your-own-password flow — that needs the old one and has no
     # endpoint yet.
     password: str | None = Field(default=None, min_length=6, max_length=128)
+    title: str | None = Field(default=None, max_length=80)
+    discountLimit: Decimal | None = Field(default=None, ge=0, le=100)
+
+
+class AbilityOut(BaseModel):
+    key: str
+    resource: str
+    action: str
+    label: str
+    hint: str = ""
+
+
+class AbilityGroupOut(BaseModel):
+    key: str
+    label: str
+    abilities: list[AbilityOut]
+
+
+class PresetOut(BaseModel):
+    roleId: str
+    label: str
+    discountLimit: str
+    abilities: list[str]
+
+
+class AbilitiesOut(BaseModel):
+    groups: list[AbilityGroupOut]
+    presets: list[PresetOut]

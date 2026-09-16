@@ -59,6 +59,24 @@ class SyncStatusOut(BaseModel):
     schedulerActive: bool
     scheduleHint: str
     serverTime: datetime
+    # Downstream: what head office sent here.
+    pullCursor: int = 0
+    lastPullAt: datetime | None = None
+    lastPullError: str | None = None
+
+
+class SyncCollectOut(BaseModel):
+    """A quick exchange with head office: collect what it sent, send what's waiting here. No figures."""
+
+    ok: bool
+    applied: int
+    failed: int
+    sent: int
+    pendingAfter: int
+    # Items whose stock went to head office because they moved since it was last told.
+    stockItems: int = 0
+    error: str | None = None
+    skippedReason: str | None = None
 
 
 class SyncRunOut(BaseModel):
@@ -76,3 +94,7 @@ class SyncRunOut(BaseModel):
     tradingDays: int = 0
     productDays: int = 0
     stockRows: int = 0
+    # Updates collected from head office in the same run.
+    pulledApplied: int = 0
+    pulledFailed: int = 0
+    pullError: str | None = None

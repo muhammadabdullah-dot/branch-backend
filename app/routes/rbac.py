@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, status
 
 from app.controllers import rbac_controller
-from app.core.resources import RBAC_MANAGEMENT_RESOURCE
-from app.middlewares.auth import get_current_user, require_permission
+from app.middlewares.auth import get_current_user, require_branch_manager
 from app.models import User
 from app.schemas.auth import PermissionOut
 from app.schemas.rbac import (
+    AbilitiesOut,
     RoleOut,
     UpdatePermissionsRequest,
     UserCreateRequest,
@@ -17,13 +17,20 @@ from app.schemas.rbac import (
 router = APIRouter(prefix="/rbac", tags=["rbac"])
 users_router = APIRouter(prefix="/users", tags=["rbac"])
 
-_read = require_permission(RBAC_MANAGEMENT_RESOURCE, "R")
-_write = require_permission(RBAC_MANAGEMENT_RESOURCE, "W")
+# Staff and access are the Branch Manager's alone — not a tick anyone else can be given.
+_read = require_branch_manager
+_write = require_branch_manager
 
 
 @router.get("/resources", response_model=list[str])
 async def resources(user: User = Depends(_read)) -> list[str]:
     return rbac_controller.resources()
+
+
+@router.get("/abilities", response_model=AbilitiesOut)
+async def abilities(user: User = Depends(_read)) -> AbilitiesOut:
+    """Everything a person at the branch can be given, grouped and in plain words, with the two starting points."""
+    return AbilitiesOut(**rbac_controller.abilities())
 
 
 @router.get("/roles", response_model=list[RoleOut])
@@ -36,12 +43,12 @@ async def roles(user: User = Depends(_read)) -> list[RoleOut]:
 async def create_user(payload: UserCreateRequest, caller: User = Depends(_write)) -> UserSummaryOut:
     """Take on a new member of branch staff.
 
-    Behind the same `branch-console.staff-access` resource that already governs who may change
-    access — the Branch Manager holds it. There is deliberately no separate branch-admin role:
+    Only a Branch Manager account can do this, the same as changing access. There is deliberately no
+    separate branch-admin role:
     the person who answers for the branch is the person who hires into it, and a second
     authority would just be someone else to find when a salesperson starts on a Monday.
     """
-    return await rbac_controller.create_user(payload)
+    return await rbac_controller.create_user(payload, caller)
 
 
 @users_router.patch("/{user_id}", response_model=UserSummaryOut)

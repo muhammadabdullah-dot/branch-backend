@@ -1,9 +1,12 @@
 """Services are where ORM calls happen — no repository layer. RBAC enforcement and management both live here."""
 from tortoise.transactions import in_transaction
 
-from app.core.resources import RESOURCES, resources_for_role
+from decimal import Decimal
+
+from app.core.abilities import ABILITIES, GROUPS, PRESETS, normalise, preset_grants, preset_limit
+from app.core.resources import RESOURCES, excluded_resources_for_role, resources_for_role
 from app.core.security import hash_password
-from app.models import Role, User, UserPermission
+from app.models import Role, RoleDefaultPermission, User, UserPermission
 from app.schemas.auth import PermissionOut
 
 _ACTION_FIELDS = {"R": "can_read", "W": "can_write", "X": "can_execute"}
@@ -29,7 +32,49 @@ def list_resources() -> list[str]:
 
 
 async def list_users() -> list[User]:
-    return await User.all()
+    return await User.all().order_by("name")
+
+
+def discount_limit_of(user: User) -> Decimal:
+    """The most bill discount this person may give — and approve for others."""
+    return user.discount_limit if user.discount_limit is not None else preset_limit(user.role_id)
+
+
+async def grants_of(user: User) -> dict[str, set[str]]:
+    return {p.resource: set(p.actions) for p in await effective_permissions(user)}
+
+
+def abilities_catalog() -> dict:
+    return {
+        "groups": [
+            {"key": key, "label": label, "abilities": [
+                {"key": f"{resource}:{action}", "resource": resource, "action": action, "label": text, "hint": hint}
+                for group, resource, action, text, hint in ABILITIES if group == key
+            ]}
+            for key, label in GROUPS
+        ],
+        "presets": [
+            {"roleId": role_id, "label": p["label"], "discountLimit": str(p["discountLimit"]),
+             "abilities": sorted(f"{r}:{a}" for r, a in p["abilities"])}
+            for role_id, p in PRESETS.items()
+        ],
+    }
+
+
+async def _refuse_beyond_caller(caller: User | None, grants: dict[str, set[str]], limit: Decimal | None) -> None:
+    """Nobody gives what they don't have: no ability they lack, no discount limit above their own."""
+    if caller is None:
+        return
+    mine = await grants_of(caller)
+    missing = sorted(f"{r}:{a}" for r, actions in grants.items() for a in actions if a not in mine.get(r, set()))
+    if missing:
+        labels = {f"{r}:{a}": text for _, r, a, text, _ in ABILITIES}
+        # Name the abilities; a "see it" that only comes along with one of them isn't worth listing.
+        named = [labels[m] for m in missing if m in labels] or missing
+        names = ", ".join(named[:4])
+        raise RbacError(f"You can't give access you don't have yourself: {names}{' …' if len(named) > 4 else ''}.", status=403)
+    if limit is not None and limit > discount_limit_of(caller):
+        raise RbacError(f"You can't set a discount limit above your own ({discount_limit_of(caller).normalize():f}%).", status=403)
 
 
 class RbacError(Exception):
@@ -42,7 +87,10 @@ async def list_roles() -> list[Role]:
     return await Role.all().order_by("name")
 
 
-async def create_user(name: str, email: str, password: str, role_id: str) -> User:
+async def create_user(
+    name: str, email: str, password: str, role_id: str, *, title: str | None = None,
+    discount_limit: Decimal | None = None, caller: User | None = None,
+) -> User:
     """Take on a new member of branch staff.
 
     The account is created with its role's standard access materialized into real permission rows,
@@ -56,24 +104,51 @@ async def create_user(name: str, email: str, password: str, role_id: str) -> Use
     if await User.filter(email=email).exists():
         raise RbacError(f"Somebody already uses {email} on this branch.", status=409)
 
+    role = await Role.get(id=role_id)
+    # Once head office manages a starting point, its list is the standard access; otherwise the software's own.
+    if role.managed_by_head_office:
+        standard = {
+            row.resource: {a for a, f in _ACTION_FIELDS.items() if getattr(row, f)}
+            for row in await RoleDefaultPermission.filter(role=role)
+        }
+    else:
+        standard = preset_grants(role_id)
+    standard = {r: a for r, a in standard.items() if r not in excluded_resources_for_role(role_id)}
+    limit = discount_limit if discount_limit is not None else preset_limit(role_id)
+    await _refuse_beyond_caller(caller, standard, limit)
     async with in_transaction():
         user = await User.create(
             name=name.strip(), email=email, password_hash=hash_password(password),
-            role_id=role_id, active=True,
+            role_id=role_id, active=True, title=(title or "").strip() or PRESETS.get(role_id, {}).get("label"),
+            discount_limit=limit,
         )
         await UserPermission.bulk_create([
             UserPermission(
                 user=user, resource=resource,
-                can_read=True, can_write=True, can_execute=True,
-            ) for resource in sorted(resources_for_role(role_id))
+                can_read="R" in actions, can_write="W" in actions, can_execute="X" in actions, granted_by=caller,
+            ) for resource, actions in sorted(standard.items())
         ])
+    from app.services import staff_sync_service
+    await staff_sync_service.emit(user.id, bump=False)
     return user
 
 
-async def update_user(user_id: str, *, name=None, email=None, active=None, password=None) -> User | None:
+async def update_user(
+    user_id: str, *, name=None, email=None, active=None, password=None, title=None, discount_limit=None,
+    caller: User | None = None, fields_set: set[str] | None = None,
+) -> User | None:
     user = await User.get_or_none(id=user_id)
     if not user:
         return None
+    fields_set = fields_set or set()
+    if "title" in fields_set:
+        user.title = (title or "").strip() or None
+    if "discountLimit" in fields_set and discount_limit is not None:
+        new_limit = Decimal(str(discount_limit))
+        # Keeping or lowering someone's limit is always fine; only raising it is held to the editor's own.
+        if new_limit > discount_limit_of(user):
+            await _refuse_beyond_caller(caller, {}, new_limit)
+        user.discount_limit = new_limit
     if email is not None:
         email = email.strip().lower()
         if await User.filter(email=email).exclude(id=user.id).exists():
@@ -86,6 +161,9 @@ async def update_user(user_id: str, *, name=None, email=None, active=None, passw
     if password is not None:
         user.password_hash = hash_password(password)
     await user.save()
+    from app.services import staff_sync_service
+    await staff_sync_service.emit(user.id)
+    await user.refresh_from_db()
     return user
 
 
@@ -102,14 +180,25 @@ async def replace_user_permissions(
     target = await User.get_or_none(id=target_user_id)
     if not target:
         return None
+    excluded = excluded_resources_for_role(target.role_id)
+    wanted = normalise({
+        g.resource: {a for a in g.actions if a in _ACTION_FIELDS}
+        for g in grants if g.resource in RESOURCES and g.resource not in excluded
+    })
+    # Only what changes has to be within the caller's own access: someone keeps abilities they already had.
+    current = await grants_of(target)
+    added = {r: actions - current.get(r, set()) for r, actions in wanted.items()}
+    await _refuse_beyond_caller(granted_by, {r: a for r, a in added.items() if a}, None)
     await UserPermission.filter(user=target).delete()
-    for grant in grants:
+    for resource, actions in sorted(wanted.items()):
         await UserPermission.create(
             user=target,
-            resource=grant.resource,
-            can_read="R" in grant.actions,
-            can_write="W" in grant.actions,
-            can_execute="X" in grant.actions,
+            resource=resource,
+            can_read="R" in actions,
+            can_write="W" in actions,
+            can_execute="X" in actions,
             granted_by=granted_by,
         )
+    from app.services import staff_sync_service
+    await staff_sync_service.emit(target.id, granted_by)
     return await effective_permissions(target)

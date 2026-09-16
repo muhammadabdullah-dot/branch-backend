@@ -10,6 +10,7 @@ Money = Annotated[Decimal, PlainSerializer(lambda v: format(Decimal(v), "f"), re
 # Same fix, same root cause — any DecimalField (qty included) can round-trip through SQLite
 # normalized, not just money. Separate alias purely for readability at the call site.
 Qty = Money
+Percent = Money
 
 
 def money_str(value: Decimal) -> str:

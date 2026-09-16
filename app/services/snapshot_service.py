@@ -66,23 +66,31 @@ async def build_aggregates() -> dict:
                COALESCE(SUM(disc_total), 0) AS disc_total,
                COALESCE(SUM(gst), 0)        AS gst,
                COALESCE(SUM(net_value), 0)  AS net_sales,
-               COALESCE(SUM(CASE WHEN is_credit_sale THEN net_value ELSE 0 END), 0) AS credit_sales,
-               COALESCE(SUM(CASE WHEN is_credit_sale THEN 0 ELSE net_value END), 0) AS cash_collected,
+               COALESCE(SUM(cash_back), 0) AS cash_back,
                COUNT(DISTINCT CASE WHEN party_id IS NOT NULL THEN party_id END)     AS named_customers,
                MIN(at) AS first_sale_at, MAX(at) AS last_sale_at
         FROM sale_records GROUP BY date(at)
     """)
+    # Items returned on a bill count against the day's items and cost, not towards them.
     items = {r["day"]: r for r in await _q("""
-        SELECT date(s.at) AS day, COALESCE(SUM(sl.qty), 0) AS items_sold
+        SELECT date(s.at) AS day, COALESCE(SUM(CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END), 0) AS items_sold
         FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id GROUP BY date(s.at)
     """)}
-    # Cost of goods from each product's weighted-average cost as it stands now. An exact figure
-    # would need the cost captured on the sale line itself, which the branch doesn't record — said
-    # out loud on the Cloud's drill-down rather than presented as exact.
+    # Cost of goods at each line's own cost when it was sold (the Item's average cost then), falling back to today's
+    # average only for sales from before that was kept.
     cogs = {r["day"]: r for r in await _q("""
-        SELECT date(s.at) AS day, COALESCE(SUM(sl.qty * COALESCE(p.avg_cost, 0)), 0) AS cogs
+        SELECT date(s.at) AS day,
+               COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * COALESCE(sl.unit_cost, p.avg_cost, 0)), 0) AS cogs
         FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id
         JOIN products p ON p.id = sl.product_id GROUP BY date(s.at)
+    """)}
+    # Money by how it was paid: cash actually kept in the drawer (less change given), and credit put on account.
+    # Card, wallet, bank, voucher and points payments are neither.
+    tender_days = {r["day"]: r for r in await _q("""
+        SELECT date(s.at) AS day,
+               COALESCE(SUM(CASE WHEN t.code = 'CASH' THEN t.amount ELSE 0 END), 0) AS cash_tendered,
+               COALESCE(SUM(CASE WHEN t.code = 'CREDIT' THEN t.amount ELSE 0 END), 0) AS credit_sales
+        FROM sale_tenders t JOIN sale_records s ON s.id = t.sale_id GROUP BY date(s.at)
     """)}
     returns_by_day = {r["day"]: r for r in await _q("""
         SELECT date(at) AS day, COUNT(*) AS returns_count,
@@ -116,7 +124,8 @@ async def build_aggregates() -> dict:
             "cogs": _s(cogs.get(d, {}).get("cogs")),
             "returnsValue": _s(returns_by_day.get(d, {}).get("returns_value")),
             "returnsCount": returns_by_day.get(d, {}).get("returns_count", 0) or 0,
-            "cashCollected": _s(r["cash_collected"]), "creditSales": _s(r["credit_sales"]),
+            "cashCollected": _s(Decimal(str(tender_days.get(d, {}).get("cash_tendered") or 0)) - Decimal(str(r["cash_back"] or 0))),
+            "creditSales": _s(tender_days.get(d, {}).get("credit_sales")),
             "cashIn": _s(cash.get(d, {}).get("cash_in")), "cashOut": _s(cash.get(d, {}).get("cash_out")),
             "tillVariance": _s(tills.get(d, {}).get("till_variance")),
             "tillsClosed": tills.get(d, {}).get("tills_closed", 0) or 0,
@@ -141,12 +150,28 @@ async def build_aggregates() -> dict:
         "qty": _s(r["qty"]), "netSales": _s(r["net_sales"]), "cogs": _s(r["cogs"]),
     } for r in await _q("""
         SELECT date(s.at) AS day, p.sku, p.name, p.department, p.category, p.brand,
-               COALESCE(SUM(sl.qty), 0) AS qty,
-               COALESCE(SUM(sl.qty * sl.unit_price), 0) AS net_sales,
-               COALESCE(SUM(sl.qty * COALESCE(p.avg_cost, 0)), 0) AS cogs
+               COALESCE(SUM(CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END), 0) AS qty,
+               COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * sl.unit_price - COALESCE(sl.disc_amount, 0)), 0) AS net_sales,
+               COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * COALESCE(sl.unit_cost, p.avg_cost, 0)), 0) AS cogs
         FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id
         JOIN products p ON p.id = sl.product_id
         GROUP BY date(s.at), p.sku
+    """)]
+
+    # Who sold how much of each item, each day: the person is whoever rang the bill, as in `cashiers` above.
+    product_cashiers = [{
+        "day": r["day"], "sku": r["sku"], "cashierName": r["cashier_name"], "invoices": r["invoices"],
+        "qty": _s(r["qty"]), "netSales": _s(r["net_sales"]), "cogs": _s(r["cogs"]),
+    } for r in await _q("""
+        SELECT date(s.at) AS day, p.sku, u.name AS cashier_name,
+               COUNT(DISTINCT s.id) AS invoices,
+               COALESCE(SUM(CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END), 0) AS qty,
+               COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * sl.unit_price - COALESCE(sl.disc_amount, 0)), 0) AS net_sales,
+               COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * COALESCE(sl.unit_cost, p.avg_cost, 0)), 0) AS cogs
+        FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id
+        JOIN products p ON p.id = sl.product_id
+        JOIN users u ON u.id = s.cashier_id
+        GROUP BY date(s.at), p.sku, u.name
     """)]
 
     hourly = [{
@@ -160,14 +185,31 @@ async def build_aggregates() -> dict:
 
     till_closes = [{
         "day": r["day"], "sessionNumber": r["session_number"], "cashierName": r["cashier_name"] or "-",
+        "counterName": r["counter_name"],
         "openedAt": _iso(r["opened_at"]), "closedAt": _iso(r["closed_at"]),
         "openingFloat": _s(r["opening_float"]), "netCash": _s(r["net_cash"]),
         "countedCash": _s(r["counted_cash"]), "variance": _s(r["variance"]),
     } for r in await _q("""
-        SELECT date(s.closed_at) AS day, s.session_number, u.name AS cashier_name,
+        SELECT date(s.closed_at) AS day, s.session_number, u.name AS cashier_name, c.name AS counter_name,
                s.opened_at, s.closed_at, s.opening_float, s.net_cash, s.counted_cash, s.variance
         FROM till_sessions s LEFT JOIN users u ON u.id = s.opened_by_id
+        LEFT JOIN sales_counters c ON c.id = s.counter_id
         WHERE s.closed_at IS NOT NULL
+    """)]
+
+    # Who was put on which counter, and for how long. This is the one figure head office cannot work
+    # out backwards from sales: somebody on the floor all morning who sold nothing is invisible to
+    # every other row in this snapshot.
+    duties = [{
+        "day": r["day"], "cashierName": r["cashier_name"] or "-", "counterName": r["counter_name"],
+        "spells": r["spells"], "minutes": int(r["minutes"] or 0),
+    } for r in await _q("""
+        SELECT date(d.started_at) AS day, u.name AS cashier_name, c.name AS counter_name,
+               COUNT(*) AS spells,
+               SUM((julianday(COALESCE(d.ended_at, CURRENT_TIMESTAMP)) - julianday(d.started_at)) * 1440) AS minutes
+        FROM counter_duties d JOIN users u ON u.id = d.user_id
+        JOIN sales_counters c ON c.id = d.counter_id
+        GROUP BY date(d.started_at), u.name, c.name
     """)]
 
     tenders = [{
@@ -225,8 +267,8 @@ async def build_aggregates() -> dict:
     """))[0]["stock_value"]
 
     return {
-        "daily": daily_out, "cashiers": cashiers, "products": products, "hourly": hourly,
-        "tillCloses": till_closes, "tenders": tenders, "overrides": overrides,
+        "daily": daily_out, "cashiers": cashiers, "products": products, "productCashiers": product_cashiers, "hourly": hourly,
+        "tillCloses": till_closes, "duties": duties, "tenders": tenders, "overrides": overrides,
         "returns": return_rows, "creditCustomers": credit,
         "alerts": await build_alerts(), "stockValue": _s(stock_value),
     }
@@ -283,23 +325,19 @@ async def build_alerts() -> list[dict]:
     return out
 
 
-async def stock_rows() -> list[dict]:
-    """One row per catalog product: what is on hand, what it cost, what it sells for, and when it
-    last moved.
+async def stock_rows(product_ids: list[str] | None = None) -> list[dict]:
+    """One row per catalog product (or just `product_ids`): what is on hand, what it cost, what it sells
+    for, when it last moved — and where it came from and went (see stock_provenance_service).
 
     `last_sold_at` is the field the whole dead-stock question turns on, and it is computed here
     rather than on the Cloud on purpose — the branch holds the complete sales history, while the
     Cloud only ever sees the window of daily stats it has been sent. A product last sold eighteen
     months ago is invisible to the Cloud's own data and obvious to this query.
     """
-    return [{
-        "sku": r["sku"], "name": r["name"], "department": r["department"],
-        "category": r["category"], "brand": r["brand"],
-        "qty": _s(r["qty"]), "avgCost": _s(r["avg_cost"]), "price": _s(r["price"]),
-        "lastSoldAt": _iso(r["last_sold_at"]), "lastReceivedAt": _iso(r["last_received_at"]),
-        "unitsSold": _s(r["units_sold"]), "daysWithSales": r["days_with_sales"] or 0,
-    } for r in await _q("""
-        SELECT p.sku, p.name, p.department, p.category, p.brand,
+    from app.services import stock_provenance_service
+
+    sql = """
+        SELECT p.id, p.sku, p.name, p.department, p.category, p.brand,
                p.avg_cost, p.price,
                COALESCE(b.qty, 0)            AS qty,
                s.last_sold_at, s.units_sold, s.days_with_sales,
@@ -315,7 +353,51 @@ async def stock_rows() -> list[dict]:
                    GROUP BY sl.product_id) s ON s.product_id = p.id
         LEFT JOIN (SELECT product_id, MAX(at) AS last_received_at
                    FROM stock_movements WHERE qty > 0 GROUP BY product_id) g ON g.product_id = p.id
-    """)]
+        {where}
+    """
+    conn = Tortoise.get_connection("default")
+    if product_ids is None:
+        found = await conn.execute_query_dict(sql.format(where=""))
+    else:
+        found = []
+        for i in range(0, len(product_ids), 500):
+            chunk = product_ids[i:i + 500]
+            found += await conn.execute_query_dict(sql.format(where=f"WHERE p.id IN ({','.join('?' * len(chunk))})"), chunk)
+    detail = await stock_provenance_service.detail(product_ids)
+    out = []
+    for r in found:
+        extra = detail.get(r["id"]) or {}
+        out.append({
+            "sku": r["sku"], "name": r["name"], "department": r["department"],
+            "category": r["category"], "brand": r["brand"],
+            "qty": _s(r["qty"]), "avgCost": _s(r["avg_cost"]), "price": _s(r["price"]),
+            "lastSoldAt": _iso(r["last_sold_at"]), "lastReceivedAt": _iso(r["last_received_at"]),
+            "unitsSold": _s(r["units_sold"]), "daysWithSales": r["days_with_sales"] or 0,
+            "flows": extra.get("flows") or {}, "origin": extra.get("origin") or {},
+            "locations": extra.get("locations") or [], "lastIn": extra.get("lastIn"),
+            "lastMovedAt": extra.get("lastMovedAt"),
+        })
+    return out
+
+
+async def changed_product_ids(after_rowid: int, after: datetime | None) -> tuple[list[str], int]:
+    """Products whose stock moved (or whose price changed) since the last time head office was told,
+    and the movement row it was told up to."""
+    conn = Tortoise.get_connection("default")
+    mark = (await conn.execute_query_dict("SELECT COALESCE(MAX(rowid), 0) AS m FROM stock_movements"))[0]["m"]
+    ids = {r["product_id"] for r in await conn.execute_query_dict(
+        "SELECT DISTINCT product_id FROM stock_movements WHERE rowid > ? AND rowid <= ?", [after_rowid, mark],
+    )}
+    if after is not None:
+        ids |= {r["product_id"] for r in await conn.execute_query_dict(
+            "SELECT DISTINCT product_id FROM product_price_changes WHERE at > ?", [after.isoformat(sep=" ")],
+        )}
+    return sorted(ids), int(mark)
+
+
+async def movement_mark() -> int:
+    rows = await Tortoise.get_connection("default").execute_query_dict("SELECT COALESCE(MAX(rowid), 0) AS m FROM stock_movements")
+    return int(rows[0]["m"])
 
 
 def chunked(rows: list[dict], size: int = STOCK_CHUNK_SIZE):

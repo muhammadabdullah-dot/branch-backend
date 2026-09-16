@@ -1,9 +1,9 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.schemas.types import Money, Qty
+from app.schemas.types import Money, Percent, Qty
 
 
 class SaleLineIn(BaseModel):
@@ -11,20 +11,71 @@ class SaleLineIn(BaseModel):
     qty: Decimal
     unitPrice: Decimal
     isReturn: bool = False
+    # The alternate (pack) barcode scanned for this line, if any: its pack discount applies instead of
+    # the Item's own.
+    aliasCode: str | None = None
+
+
+class MemberIn(BaseModel):
+    """Who the bill is for. `code` picks an existing member; otherwise `name` and `phone` find the member
+    by number or sign them up. Card and online payments always need one; for anything else `join` says the
+    customer chose to become a member."""
+    code: str | None = Field(default=None, max_length=20)
+    name: str | None = Field(default=None, max_length=120)
+    phone: str | None = Field(default=None, max_length=30)
+    join: bool = False
+
+
+class TenderDetailIn(BaseModel):
+    # Card: last 4 digits. Easypaisa / JazzCash: the paying account's number.
+    reference: str | None = Field(default=None, max_length=40)
+    # A transfer's transaction ID — required for a bank transfer.
+    transactionId: str | None = Field(default=None, max_length=60)
+    # The shop account a bank transfer went into.
+    account: str | None = Field(default=None, max_length=80)
+    # What POST /sales/payment-proofs returned for the customer's screenshot.
+    proofId: str | None = Field(default=None, max_length=160)
 
 
 class SaleCreateRequest(BaseModel):
     partyId: str | None = None
+    member: MemberIn | None = None
+    # Keyed by tender code, for the tenders that carry details (CARD, EASYPAISA, JAZZCASH, BANK).
+    tenderDetails: dict[str, TenderDetailIn] = {}
     lines: list[SaleLineIn]
     discPercent: Decimal = Decimal("0")
     flatDisc: Decimal = Decimal("0")
     fare: Decimal = Decimal("0")
     tenders: dict[str, Decimal]
     voucherCode: str | None = None
-    discountOverrideByUserId: str | None = None
+    # Needed only for a discount above salesperson authority: the signed approval from
+    # POST /sales/discount-approvals, issued for this salesperson and this bill's clientRequestId.
+    discountApprovalToken: str | None = None
     # Optional client-generated idempotency key — a retried request with the same key returns
     # the already-committed sale instead of creating a second one. Omit for the old behavior.
+    # Required in practice for an above-authority discount, since the approval is bound to it.
     clientRequestId: str | None = None
+
+
+class DiscountApprovalRequest(BaseModel):
+    # The bill's clientRequestId. Only one sale can commit under it, so one approval covers one sale.
+    billId: str = Field(min_length=1, max_length=80)
+    # The most total effective discount being approved, any flat discount included.
+    maxPercent: Decimal = Field(gt=0, le=100)
+    # The manager signing in at the till. Left out when the salesperson holds the authority themselves.
+    email: str | None = None
+    password: str | None = None
+
+
+class DiscountApprovalOut(BaseModel):
+    token: str
+    approverId: str
+    approverName: str
+    maxPercent: Percent
+    expiresAt: datetime
+    # Relative, so the till can time the approval out on its own clock rather than trusting that it
+    # agrees with the server's.
+    expiresInSeconds: int
 
 
 class SaleLineOut(BaseModel):
@@ -35,12 +86,20 @@ class SaleLineOut(BaseModel):
     unitPrice: Money
     isWeighed: bool
     isReturn: bool
+    # Discount taken off the line (Item discount + share of the bill discount). Null on older sales.
+    discAmount: Money | None = None
+    # The pack barcode the line was rung up by, so a held bill recalls with its pack discount.
+    aliasCode: str | None = None
 
 
 class SaleTenderOut(BaseModel):
     code: str
     name: str
     amount: Money
+    reference: str | None = None
+    transactionId: str | None = None
+    account: str | None = None
+    hasProof: bool = False
 
 
 class SaleRecordOut(BaseModel):
@@ -59,6 +118,11 @@ class SaleRecordOut(BaseModel):
     netValue: Money
     discountOverrideBy: str | None = None
     earnedPoints: int
+    memberCode: str | None = None
+    memberName: str | None = None
+    pointsRedeemed: int = 0
+    # The member's balance now, for the receipt.
+    memberPoints: int | None = None
     tenders: list[SaleTenderOut]
     received: Money
     cashBack: Money
@@ -69,10 +133,20 @@ class SaleRecordOut(BaseModel):
 class ReturnLineIn(BaseModel):
     productId: str
     qty: Decimal
-    unitPrice: Decimal
+    # Ignored: the refund is priced from the bill. Kept so older screens still send a valid request.
+    unitPrice: Decimal = Decimal("0")
 
 
 class ReturnCreateRequest(BaseModel):
+    against: str
+    lines: list[ReturnLineIn]
+    # CASH · CREDIT (off the customer's balance) · CARD · BANK · EASYPAISA · JAZZCASH. Empty: credit bills go
+    # back off the balance, everything else as cash.
+    refundMethod: str | None = None
+    refundReference: str | None = None
+
+
+class ReturnQuoteRequest(BaseModel):
     against: str
     lines: list[ReturnLineIn]
 
@@ -83,6 +157,12 @@ class ReturnRecordOut(BaseModel):
     at: datetime
     cashierId: str
     refundTotal: Money
+    refundMethod: str = "CASH"
+    taxTotal: Money | None = None
+
+
+class PaymentProofOut(BaseModel):
+    proofId: str
 
 
 class NextInvoiceNumberOut(BaseModel):

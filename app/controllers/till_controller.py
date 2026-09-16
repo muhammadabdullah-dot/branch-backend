@@ -18,15 +18,26 @@ from app.services import till_service
 
 
 def _movement_out(m) -> CashMovementOut:
-    return CashMovementOut(id=str(m.id), kind=m.kind, amount=m.amount, denominations=m.denominations, notes=m.notes, at=m.at)
+    from app.models import Account
+
+    account = m.__dict__.get("_account")
+    account = account if isinstance(account, Account) else None
+    return CashMovementOut(
+        id=str(m.id), kind=m.kind, amount=m.amount, denominations=m.denominations, notes=m.notes, at=m.at,
+        accountId=str(m.account_id) if m.account_id else None, accountName=account.name if account else None, payee=m.payee,
+    )
 
 
-async def current() -> TillCurrentOut:
-    till = await till_service.get_current()
+async def current(user: User | None = None) -> TillCurrentOut:
+    till = await till_service.get_current(user)
     if not till:
         return TillCurrentOut(isOpen=False)
+    counter = till.__dict__.get("_counter")
+    opened_by = await till.opened_by
     return TillCurrentOut(
-        isOpen=True, sessionNumber=till.session_number, openedAt=till.opened_at,
+        isOpen=True, sessionId=str(till.id), sessionNumber=till.session_number, openedAt=till.opened_at,
+        counterId=str(till.counter_id) if till.counter_id else None,
+        counterName=counter.name if counter else None, openedBy=opened_by.name if opened_by else None,
         openingFloat=till.opening_float, openingDenominations=till.opening_denominations,
         openingNotes=till.opening_notes, movements=[_movement_out(m) for m in till.movements],
     )
@@ -34,15 +45,16 @@ async def current() -> TillCurrentOut:
 
 async def open_till(user: User, payload: TillOpenRequest) -> TillCurrentOut:
     try:
-        await till_service.open_till(user, payload.denominations, payload.notes)
+        await till_service.open_till(user, payload.denominations, payload.notes, payload.counterId)
     except till_service.TillError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
-    return await current()
+    return await current(user)
 
 
 async def cash_in(user: User, payload: CashMovementRequest) -> CashMovementOut:
     try:
-        movement = await till_service.record_movement(user, "in", payload.denominations, payload.notes)
+        movement = await till_service.record_movement(user, "in", payload.denominations, payload.notes, payload.accountId, payload.payee, payload.sessionId)
+        await movement.fetch_related("account")
     except till_service.TillError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
     return _movement_out(movement)
@@ -50,15 +62,16 @@ async def cash_in(user: User, payload: CashMovementRequest) -> CashMovementOut:
 
 async def cash_out(user: User, payload: CashMovementRequest) -> CashMovementOut:
     try:
-        movement = await till_service.record_movement(user, "out", payload.denominations, payload.notes)
+        movement = await till_service.record_movement(user, "out", payload.denominations, payload.notes, payload.accountId, payload.payee, payload.sessionId)
+        await movement.fetch_related("account")
     except till_service.TillError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
     return _movement_out(movement)
 
 
-async def preview_close() -> TillClosePreviewOut:
+async def preview_close(user: User, session_id: str | None = None) -> TillClosePreviewOut:
     try:
-        breakdown = await till_service.preview_close()
+        breakdown = await till_service.preview_close(user, session_id)
     except till_service.TillError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
     return TillClosePreviewOut(**breakdown)
@@ -66,7 +79,7 @@ async def preview_close() -> TillClosePreviewOut:
 
 async def close(user: User, payload: TillCloseRequest) -> TillCloseOut:
     try:
-        result = await till_service.close_till(user, payload.countedDenominations)
+        result = await till_service.close_till(user, payload.countedDenominations, payload.sessionId)
     except till_service.TillError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
     return TillCloseOut(**result)
@@ -78,7 +91,8 @@ async def list_sessions(from_at: datetime | None, to_at: datetime | None, limit:
     sessions, total = await till_service.list_closed_sessions(from_at, to_at, limit, offset)
     items = [
         TillSessionSummaryOut(
-            sessionNumber=s.session_number, cashierId=str(s.opened_by_id), openedAt=s.opened_at, closedAt=s.closed_at,
+            sessionNumber=s.session_number, counterName=s.counter.name if s.counter_id else None,
+            cashierId=str(s.opened_by_id), openedAt=s.opened_at, closedAt=s.closed_at,
             openingFloat=s.opening_float, netCash=s.net_cash, countedCash=s.counted_cash, variance=s.variance,
         )
         for s in sessions

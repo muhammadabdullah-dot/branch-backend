@@ -30,7 +30,7 @@ yet (only receiving), so nothing to simulate.
 import asyncio
 import random
 from datetime import datetime, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, ROUND_UP, Decimal
 
 from tortoise import Tortoise
 
@@ -57,7 +57,7 @@ from app.models import (
 )
 from app.schemas.inventory import AdjustmentSubmitRequest, CountSubmitRequest, GRNCreateRequest, GRNLineIn
 from app.schemas.sales import ReturnCreateRequest, ReturnLineIn, SaleCreateRequest, SaleLineIn
-from app.services import inventory_service, returns_service, sales_service, till_service
+from app.services import discount_approval_service, inventory_service, returns_service, sales_service, till_service
 
 RNG = random.Random(20260801)
 ZERO = Decimal("0")
@@ -200,14 +200,22 @@ async def do_till_day(day: int, operator: User, sample_products: list[Product], 
 
         disc_percent = Decimal("0")
         flat_disc = ZERO
-        override_by = None
+        approval_token = None
+        client_request_id = f"aug-sim-{day}-{i}"
         roll = RNG.random()
         if roll < 0.10:
             flat_disc = Decimal(RNG.choice([50, 100, 150]))
         if roll < 0.04:
             disc_percent = Decimal(RNG.choice([8, 10]))
             other_sm = [u for u in sales_managers if u.id != operator.id]
-            override_by = str((other_sm[0] if other_sm else sales_managers[0]).id)
+            approver = other_sm[0] if other_sm else sales_managers[0]
+            # POST /sales takes a signed approval for this bill, not a manager's id. There's no manager
+            # password to sign in with here, so grant it directly for the bill's whole effective discount.
+            gross = sum((l.qty * l.unitPrice for l in lines), ZERO)
+            effective_pct = (gross * disc_percent / Decimal("100") + flat_disc) / gross * Decimal("100")
+            approval_token = discount_approval_service.grant(
+                approver, operator, client_request_id, effective_pct.quantize(Decimal("0.1"), rounding=ROUND_UP)
+            ).token
 
         net_value = compute_net_value(lines, disc_percent, flat_disc, tax_rate_by_id)
 
@@ -229,8 +237,8 @@ async def do_till_day(day: int, operator: User, sample_products: list[Product], 
 
         payload = SaleCreateRequest(
             partyId=party_id, lines=lines, discPercent=disc_percent, flatDisc=flat_disc, fare=ZERO,
-            tenders=tenders, voucherCode=None, discountOverrideByUserId=override_by,
-            clientRequestId=f"aug-sim-{day}-{i}",
+            tenders=tenders, voucherCode=None, discountApprovalToken=approval_token,
+            clientRequestId=client_request_id,
         )
         t0 = datetime.now(timezone.utc)
         try:

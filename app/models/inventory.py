@@ -22,9 +22,14 @@ class StockMovement(models.Model):
     )
     # Not auto_now_add: seed data needs to backdate opening-balance movements (daysAgo(n)).
     at = fields.DatetimeField()
+    # What one unit of this movement was worth at cost when it happened. Null on older movements.
+    unit_cost = fields.DecimalField(max_digits=12, decimal_places=4, null=True)
 
     class Meta:
         table = "stock_movements"
+        # Stock on hand is a fold over one item's movements, and the snapshot folds every item every
+        # couple of hours: without this it is a full scan of the whole ledger each time.
+        indexes = (("product", "at"),)
 
 
 async def balance_for(product_id: str, location_id: str | None = None):

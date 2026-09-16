@@ -71,5 +71,19 @@ class SyncState(models.Model):
     events_sent = fields.IntField(default=0)
     running = fields.BooleanField(default=False)
 
+    # --- Downstream: what head office sends here ---------------------------------------------
+    # The last head-office message this branch applied. Pulls ask for everything after it.
+    pull_cursor = fields.IntField(default=0)
+    last_pull_at = fields.DatetimeField(null=True)
+    last_pull_error = fields.TextField(null=True)
+    # Apply results not yet reported back because the link dropped after applying; sent with the next pull.
+    pending_acks = fields.JSONField(default=list)
+
+    # --- Stock head office already has ------------------------------------------------------------
+    # The last stock movement (by row) and the moment head office's item-level stock was brought up to
+    # date. Between full pushes, only items that moved after this go up.
+    stock_mark = fields.IntField(default=0)
+    stock_mark_at = fields.DatetimeField(null=True)
+
     class Meta:
         table = "sync_state"

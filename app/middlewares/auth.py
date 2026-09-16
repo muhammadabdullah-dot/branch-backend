@@ -32,6 +32,13 @@ def require_permission(resource: str, action: str):
     return checker
 
 
+async def require_branch_manager(user: User = Depends(get_current_user)) -> User:
+    """Staff and access: decided only by a Branch Manager account, whatever else anyone has been given."""
+    if user.role_id != "branch-manager":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a Branch Manager can manage staff and their access.")
+    return user
+
+
 def require_any_permission(*pairs: tuple[str, str]):
     """Passes if the caller holds ANY of the given (resource, action) pairs — for the rare screen
     genuinely reachable from two different modules (e.g. Parties, read from both Billing and

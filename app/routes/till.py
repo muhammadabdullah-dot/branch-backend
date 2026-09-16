@@ -30,7 +30,7 @@ _sessions_read = require_any_permission(("store.xz", "R"), ("reports", "R"))
 
 @router.get("/current", response_model=TillCurrentOut)
 async def current(user: User = Depends(_current_read)) -> TillCurrentOut:
-    return await till_controller.current()
+    return await till_controller.current(user)
 
 
 @router.post("/open", response_model=TillCurrentOut)
@@ -49,8 +49,8 @@ async def cash_out(payload: CashMovementRequest, user: User = Depends(_write)) -
 
 
 @router.get("/close/preview", response_model=TillClosePreviewOut)
-async def preview_close(user: User = Depends(_read)) -> TillClosePreviewOut:
-    return await till_controller.preview_close()
+async def preview_close(sessionId: str | None = None, user: User = Depends(_read)) -> TillClosePreviewOut:
+    return await till_controller.preview_close(user, sessionId)
 
 
 @router.post("/close", response_model=TillCloseOut)

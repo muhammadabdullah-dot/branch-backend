@@ -17,11 +17,12 @@ an authenticated reset here *and* a revoke at head office.
 from fastapi import APIRouter, Depends, Header, Request, Response, status
 
 from app.controllers import registration_controller
-from app.middlewares.auth import require_permission
+from app.middlewares.auth import require_any_permission, require_permission
 from app.models import User
 from app.schemas.registration import (
     RegistrationStatusOut,
     ResetIn,
+    SyncCollectOut,
     SyncRunOut,
     SyncStatusOut,
     VerifyIn,
@@ -32,6 +33,8 @@ sync_router = APIRouter(prefix="/sync", tags=["sync"])
 
 _read = require_permission("branch-console.sync", "R")
 _write = require_permission("branch-console.sync", "W")
+# Checking for new transfers is part of receiving them, so the transfer screens can ask too.
+_collect = require_any_permission(("branch-console.sync", "W"), ("inventory.transfers", "R"))
 
 
 @router.get("/status", response_model=RegistrationStatusOut)
@@ -72,6 +75,13 @@ async def reset(payload: ResetIn, user: User = Depends(_write)) -> Response:
 async def sync_status(user: User = Depends(_read)) -> SyncStatusOut:
     """Is our data reaching head office? How far behind are we, and why."""
     return await registration_controller.sync_status()
+
+
+@sync_router.post("/collect", response_model=SyncCollectOut)
+async def collect(user: User = Depends(_collect)) -> SyncCollectOut:
+    """Check head office now: collect staff and transfer updates it sent, and send this branch's waiting
+    events (receipts, account changes). The same steps the quick loop runs every couple of minutes."""
+    return await registration_controller.collect()
 
 
 @sync_router.post("/run", response_model=SyncRunOut)

@@ -4,6 +4,8 @@ from fastapi import HTTPException, status
 
 from app.models import PaymentMethod, SaleRecord, User
 from app.schemas.sales import (
+    DiscountApprovalOut,
+    DiscountApprovalRequest,
     NextInvoiceNumberOut,
     SaleCreateRequest,
     SaleLineOut,
@@ -11,7 +13,8 @@ from app.schemas.sales import (
     SaleRecordOut,
     SaleTenderOut,
 )
-from app.services import sales_service
+from app.services import discount_approval_service, media_service, sales_service
+from app.schemas.sales import PaymentProofOut
 
 
 async def _sale_out(sale: SaleRecord) -> SaleRecordOut:
@@ -23,6 +26,7 @@ async def _sale_out(sale: SaleRecord) -> SaleRecordOut:
             SaleLineOut(
                 productId=str(l.product_id), name=l.product.name, sku=l.product.sku,
                 qty=l.qty, unitPrice=l.unit_price, isWeighed=l.product.is_weighed, isReturn=l.is_return,
+                discAmount=l.disc_amount, aliasCode=l.alias_code,
             )
             for l in sale.lines
         ],
@@ -30,7 +34,17 @@ async def _sale_out(sale: SaleRecord) -> SaleRecordOut:
         grandTotal=sale.grand_total, netValue=sale.net_value,
         discountOverrideBy=(sale.discount_override_by.name if sale.discount_override_by else None),
         earnedPoints=sale.earned_points,
-        tenders=[SaleTenderOut(code=t.code, name=method_names.get(t.code, t.code), amount=t.amount) for t in sale.tenders],
+        memberCode=sale.member.code if sale.member else None,
+        memberName=sale.member.name if sale.member else None,
+        pointsRedeemed=sale.points_redeemed,
+        memberPoints=sale.member.points_balance if sale.member else None,
+        tenders=[
+            SaleTenderOut(
+                code=t.code, name=method_names.get(t.code, t.code), amount=t.amount, reference=t.reference,
+                transactionId=t.transaction_id, account=t.account, hasProof=bool(t.proof),
+            )
+            for t in sale.tenders
+        ],
         received=sale.received, cashBack=sale.cash_back, isCreditSale=sale.is_credit_sale,
         fbrInvoiceNumber=sale.fbr_invoice_number,
     )
@@ -40,12 +54,43 @@ async def next_invoice_number() -> NextInvoiceNumberOut:
     return NextInvoiceNumberOut(invoiceNumber=await sales_service.peek_next_invoice_number())
 
 
+async def request_discount_approval(user: User, payload: DiscountApprovalRequest) -> DiscountApprovalOut:
+    try:
+        approval = await discount_approval_service.issue(
+            user, payload.billId, payload.maxPercent, payload.email, payload.password
+        )
+    except discount_approval_service.ApprovalError as exc:
+        raise HTTPException(exc.status, exc.message)
+    return DiscountApprovalOut(
+        token=approval.token, approverId=str(approval.approver.id), approverName=approval.approver.name,
+        maxPercent=approval.max_percent, expiresAt=approval.expires_at,
+        expiresInSeconds=int((approval.expires_at - datetime.now(approval.expires_at.tzinfo)).total_seconds()),
+    )
+
+
 async def create(user: User, payload: SaleCreateRequest) -> SaleRecordOut:
     try:
         sale = await sales_service.create_sale(user, payload)
     except sales_service.SaleError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
     return await _sale_out(sale)
+
+
+async def upload_proof(content: bytes) -> PaymentProofOut:
+    try:
+        return PaymentProofOut(proofId=sales_service.save_payment_proof(content))
+    except media_service.MediaError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
+
+
+async def proof_file(invoice_number: str, code: str):
+    from fastapi.responses import FileResponse
+
+    found = await sales_service.payment_proof(invoice_number, code)
+    if not found:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No screenshot for that payment")
+    path, content_type = found
+    return FileResponse(path, media_type=content_type, headers={"Cache-Control": "private, max-age=3600"})
 
 
 async def get_by_invoice(invoice_number: str) -> SaleRecordOut:

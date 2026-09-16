@@ -8,11 +8,12 @@ from app.schemas.registration import (
     BranchIdentityOut,
     RegistrationStatusOut,
     ResetIn,
+    SyncCollectOut,
     SyncRunOut,
     SyncStatusOut,
     VerifyIn,
 )
-from app.services import registration_service, sync_service
+from app.services import downstream_service, registration_service, sync_service
 from app.services.registration_service import RegistrationError
 
 
@@ -68,9 +69,25 @@ async def sync_status() -> SyncStatusOut:
         schedulerActive=scheduler.is_running(),
         scheduleHint=scheduler.next_run_hint(),
         serverTime=datetime.now(timezone.utc),
+        pullCursor=state.pull_cursor, lastPullAt=state.last_pull_at, lastPullError=state.last_pull_error,
+    )
+
+
+async def collect() -> SyncCollectOut:
+    pulled = await downstream_service.pull_once(triggered_by="manual")
+    pushed = await sync_service.push_events_once(triggered_by="manual")
+    stock = await sync_service.push_stock_changes_once(triggered_by="manual")
+    return SyncCollectOut(
+        ok=pulled.ok and pushed.ok, applied=pulled.applied, failed=pulled.failed, sent=pushed.sent, stockItems=stock,
+        pendingAfter=await sync_service.pending_count(), error=pulled.error or pushed.error,
+        skippedReason=pulled.skipped_reason or pushed.skipped_reason,
     )
 
 
 async def run_sync() -> SyncRunOut:
+    pulled = await downstream_service.pull_once(triggered_by="manual")
     result = await sync_service.run_once(triggered_by="manual")
-    return SyncRunOut(**result.as_dict())
+    return SyncRunOut(
+        **result.as_dict(), pulledApplied=pulled.applied, pulledFailed=pulled.failed,
+        pullError=pulled.error or pulled.skipped_reason if not pulled.ok else None,
+    )

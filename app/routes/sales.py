@@ -1,13 +1,17 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 
 from app.controllers import returns_controller, sales_controller
 from app.middlewares.auth import require_any_permission, require_permission
 from app.models import User
 from app.schemas.sales import (
+    DiscountApprovalOut,
+    DiscountApprovalRequest,
     NextInvoiceNumberOut,
+    PaymentProofOut,
     ReturnCreateRequest,
+    ReturnQuoteRequest,
     ReturnRecordOut,
     SaleCreateRequest,
     SaleListOut,
@@ -50,9 +54,38 @@ async def create_sale(payload: SaleCreateRequest, user: User = Depends(_write)) 
     return await sales_controller.create(user, payload)
 
 
+# The customer's screenshot of a bank transfer, uploaded before the sale is saved; the sale refers to it.
+@router.post("/sales/payment-proofs", response_model=PaymentProofOut)
+async def upload_payment_proof(file: UploadFile = File(...), user: User = Depends(_write)) -> PaymentProofOut:
+    return await sales_controller.upload_proof(await file.read())
+
+
+@router.get("/sales/{invoice_number}/tenders/{code}/proof")
+async def payment_proof(
+    invoice_number: str, code: str,
+    user: User = Depends(require_any_permission(("store.billing", "R"), ("store.xz", "R"), ("reports", "R"), ("branch-console.members", "R"))),
+):
+    return await sales_controller.proof_file(invoice_number, code)
+
+
+# The salesperson asks, from the bill they're ringing up; the approver is whoever signs in here
+# (or the salesperson, if they hold store.discount-override themselves). Gated on store.billing W
+# like the sale it approves — the approver's authority is the service's check, not the route's.
+@router.post("/sales/discount-approvals", response_model=DiscountApprovalOut)
+async def request_discount_approval(
+    payload: DiscountApprovalRequest, user: User = Depends(_write)
+) -> DiscountApprovalOut:
+    return await sales_controller.request_discount_approval(user, payload)
+
+
 @router.get("/sales/{invoice_number}", response_model=SaleRecordOut)
 async def get_sale(invoice_number: str, user: User = Depends(_lookup_for_sale_or_return)) -> SaleRecordOut:
     return await sales_controller.get_by_invoice(invoice_number)
+
+
+@router.post("/returns/quote")
+async def quote_return(payload: ReturnQuoteRequest, user: User = Depends(_returns_write)) -> dict:
+    return await returns_controller.quote(payload)
 
 
 @router.post("/returns", response_model=ReturnRecordOut)

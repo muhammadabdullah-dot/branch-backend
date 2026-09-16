@@ -7,9 +7,14 @@ __pycache__/
 .env
 run.bat
 .backups/
+media/
+media-second/
 BRANCH_LOGIN_CREDENTIALS.txt
 
 # Manual safety copies taken before a migration or a data change. Never committed —
 # these are whole branch/cloud databases.
 *.db.bak-*
 *.replaced
+
+# The server's log (server.log and its rotated copies), beside the database.
+logs/

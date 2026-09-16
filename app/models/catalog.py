@@ -31,6 +31,24 @@ class Product(models.Model):
     brand = fields.CharField(max_length=120, null=True)
     active = fields.BooleanField(default=True)
 
+    # Added 2026-09-14 from the legacy Item form.
+    # The Item's own sale discount: a percentage and/or a flat amount per unit, applied on the bill.
+    disc_percent = fields.DecimalField(max_digits=5, decimal_places=2, default=0)
+    disc_flat = fields.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Legacy LockDisc: no bill-level discount may reduce this Item's price.
+    lock_disc = fields.BooleanField(default=False)
+    variant = fields.CharField(max_length=60, null=True)
+    # Legacy IMP/LOCAL: "local" or "imported".
+    origin = fields.CharField(max_length=10, null=True)
+    remarks = fields.CharField(max_length=255, null=True)
+    picture = fields.CharField(max_length=160, null=True)
+    # Legacy Child And Parent: this Item is a smaller pack of `parent`, and `parent_qty` of this
+    # Item make one parent (a strip of 10 inside a box, a bottle inside a carton of 12).
+    parent: fields.ForeignKeyNullableRelation["Product"] = fields.ForeignKeyField(
+        "models.Product", related_name="children", null=True, on_delete=fields.SET_NULL
+    )
+    parent_qty = fields.DecimalField(max_digits=12, decimal_places=3, null=True)
+
     class Meta:
         table = "products"
 
@@ -47,9 +65,54 @@ class ProductAlias(models.Model):
     )
     code = fields.CharField(max_length=60, unique=True)
     remarks = fields.CharField(max_length=255, null=True)
+    # Legacy Alternate Barcode grid: how many units one scan of this code is (a carton barcode = 12),
+    # and the discount that pack sells at.
+    qty = fields.DecimalField(max_digits=12, decimal_places=3, default=1)
+    disc_percent = fields.DecimalField(max_digits=5, decimal_places=2, default=0)
+    disc_flat = fields.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     class Meta:
         table = "product_aliases"
+
+
+class ProductSupplier(models.Model):
+    """Who supplies this Item, in order of preference — the legacy Item form's Supplier grid."""
+
+    id = fields.UUIDField(pk=True)
+    product: fields.ForeignKeyRelation[Product] = fields.ForeignKeyField(
+        "models.Product", related_name="supplier_links", on_delete=fields.CASCADE
+    )
+    supplier: fields.ForeignKeyRelation["Supplier"] = fields.ForeignKeyField(
+        "models.Supplier", related_name="product_links", on_delete=fields.CASCADE
+    )
+    priority = fields.IntField(default=1)
+
+    class Meta:
+        table = "product_suppliers"
+        unique_together = (("product", "supplier"),)
+
+
+class ProductPriceChange(models.Model):
+    """Every change to an Item's sale or retail price, and where it came from. Labels reads this to
+    reprint shelf tags for exactly the Items whose price moved (legacy "Check New Price List")."""
+
+    id = fields.UUIDField(pk=True)
+    product: fields.ForeignKeyRelation[Product] = fields.ForeignKeyField(
+        "models.Product", related_name="price_changes", on_delete=fields.CASCADE
+    )
+    old_price = fields.DecimalField(max_digits=12, decimal_places=2)
+    new_price = fields.DecimalField(max_digits=12, decimal_places=2)
+    old_rpp = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    new_rpp = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    # "form", "import" or "receiving"
+    source = fields.CharField(max_length=20)
+    changed_by: fields.ForeignKeyNullableRelation["User"] = fields.ForeignKeyField(
+        "models.User", related_name="price_changes", null=True, on_delete=fields.SET_NULL
+    )
+    at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "product_price_changes"
 
 
 class PaymentMethod(models.Model):

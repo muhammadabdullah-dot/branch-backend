@@ -6,6 +6,7 @@ Idempotent — a no-op if roles already exist, so it's safe to run on every star
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from app.core.abilities import BRANCH_MANAGER, LEGACY_JOBS, PRESETS, SALESPERSON, legacy_grants, preset_grants
 from app.core.resources import ROLE_TEMPLATES, excluded_resources_for_role, resources_for_role
 from app.core.security import hash_password
 from app.models import (
@@ -44,9 +45,19 @@ PAYMENT_METHODS = [
     ("CARD", "Card", "card"),
     ("EASYPAISA", "Easypaisa", "wallet"),
     ("JAZZCASH", "JazzCash", "wallet"),
+    ("BANK", "Bank transfer", "bank"),
     ("CREDIT", "Credit", "credit"),
     ("VOUCHER", "Gift Voucher", "gift-voucher"),
+    ("POINTS", "Loyalty points", "points"),
 ]
+
+
+async def ensure_payment_methods() -> None:
+    """Payment methods added after a branch was first set up (Bank transfer, Loyalty points) reach it on
+    its next start; existing ones keep whatever name they have."""
+    for code, name, kind in PAYMENT_METHODS:
+        if not await PaymentMethod.exists(code=code):
+            await PaymentMethod.create(code=code, name=name, kind=kind)
 
 LOCATIONS = [
     ("loc-1", "Main Store", "floor", 1),
@@ -81,22 +92,17 @@ SEED_BATCHES = [
     ("p-6", "NM-0912", 5, "60"),
 ]
 
+# The two starting points for a new person. Nothing else is a role: what anyone can do is ticked on their own
+# account (core/abilities.py). The id stays "cashier" — every permission row and the head office copy use it.
 ROLES = [
-    # Display name only. The role *id* stays "cashier": it is referenced by every
-    # existing permission row, the role templates and the seeded accounts, and
-    # renaming an identifier to change a label is a migration bought for nothing.
     ("cashier", "Salesperson", "/store/billing"),
-    ("sales-manager", "Sales Manager", "/store/billing"),
-    ("stock-keeper", "Stock Keeper", "/inventory/overview"),
-    ("inventory-manager", "Inventory Manager", "/inventory/overview"),
     ("branch-manager", "Branch Manager", "/branch-console/dashboard"),
 ]
+# The fixed roles there used to be; `revise_legacy_roles` moves their people onto per-person access.
+LEGACY_ROLES = ("sales-manager", "stock-keeper", "inventory-manager")
 
 USERS = [
     ("cashier@branch.dmarina.pk", "cashier123", "cashier", "Salesperson"),
-    ("salesmanager@branch.dmarina.pk", "sales123", "sales-manager", "Sales Manager"),
-    ("stockkeeper@branch.dmarina.pk", "stock123", "stock-keeper", "Stock Keeper"),
-    ("inventorymanager@branch.dmarina.pk", "inventory123", "inventory-manager", "Inventory Manager"),
     ("branchmanager@branch.dmarina.pk", "branch123", "branch-manager", "Branch Manager"),
 ]
 
@@ -175,12 +181,13 @@ async def seed_if_empty() -> None:
 
     for role_id, name, landing in ROLES:
         role = await Role.create(id=role_id, name=name, landing=landing)
-        for resource in resources_for_role(role_id):
-            await RoleDefaultPermission.create(role=role, resource=resource, can_read=True, can_write=True, can_execute=True)
+        for resource, actions in preset_grants(role_id).items():
+            await RoleDefaultPermission.create(role=role, resource=resource, can_read="R" in actions, can_write="W" in actions, can_execute="X" in actions)
 
     for email, password, role_id, name in USERS:
         user = await User.create(
-            name=name, email=email.lower(), password_hash=hash_password(password), role_id=role_id
+            name=name, email=email.lower(), password_hash=hash_password(password), role_id=role_id,
+            title=PRESETS[role_id]["label"], discount_limit=PRESETS[role_id]["discountLimit"],
         )
         templates = await RoleDefaultPermission.filter(role_id=role_id)
         for template in templates:
@@ -202,6 +209,54 @@ _RENAMED_PLACEHOLDERS = {
     "Cashier 2": "Salesperson 2",
     "Cashier 3": "Salesperson 3",
 }
+
+
+async def revise_legacy_roles() -> int:
+    """Move everyone on a retired fixed role (Sales Manager, Stock Keeper, Inventory Manager) — and anyone
+    on a starting point who has no title yet — onto per-person access: their job becomes their title, their
+    access becomes that job's ticks, and they get the job's discount limit. Runs at every startup and finds
+    nothing to do once it has run; the retired roles are removed when nobody is left on them."""
+    from app.models import Counter
+    from app.services import staff_sync_service
+
+    # The first start on per-person access also gives every untitled account its job's clean ticks; after
+    # that only a retired role (arriving from an old head office copy, say) is moved, so a title left blank
+    # by a Branch Manager never resets that person's access.
+    first_run = not await Counter.exists(id="per-person-access")
+    moved = 0
+    for user in await User.all():
+        legacy = user.role_id in LEGACY_ROLES
+        untitled = first_run and user.title is None and user.role_id in LEGACY_JOBS
+        if not (legacy or untitled):
+            continue
+        job = LEGACY_JOBS[user.role_id]
+        grants = legacy_grants(user.role_id)
+        await UserPermission.filter(user=user).delete()
+        for resource, actions in grants.items():
+            await UserPermission.create(
+                user=user, resource=resource, can_read="R" in actions, can_write="W" in actions, can_execute="X" in actions,
+            )
+        # A seeded placeholder name is the old role's name; a real person's name is never touched.
+        user.title = job["title"]
+        user.role_id = job["role"]
+        user.discount_limit = job["limit"]
+        await user.save(update_fields=["title", "role_id", "discount_limit", "updated_at"])
+        await staff_sync_service.emit(user.id)
+        moved += 1
+    if first_run:
+        await Counter.create(id="per-person-access", value=1)
+    for role_id in LEGACY_ROLES:
+        if await Role.exists(id=role_id) and not await User.exists(role_id=role_id):
+            await RoleDefaultPermission.filter(role_id=role_id).delete()
+            await Role.filter(id=role_id).delete()
+    for role_id, _name, _landing in ROLES:
+        role = await Role.get_or_none(id=role_id)
+        if role and not role.managed_by_head_office:
+            # The starting point's own list, with the exact ticks — not "everything on every resource".
+            await RoleDefaultPermission.filter(role=role).delete()
+            for resource, actions in preset_grants(role_id).items():
+                await RoleDefaultPermission.create(role=role, resource=resource, can_read="R" in actions, can_write="W" in actions, can_execute="X" in actions)
+    return moved
 
 
 async def sync_role_labels() -> None:
@@ -232,21 +287,48 @@ async def sync_role_resource_grants() -> None:
     UserPermission rows at User.create() time, per contracts.md's own documented limitation.
     Runs on every startup.
 
-    Additive for ordinary grants — never touches a permission a Branch Manager has hand-edited,
-    only adds ones missing entirely. The one thing it *does* remove is a resource the role
+    Additive for ordinary grants, and only for resources new to the template since the last startup —
+    never re-adds a permission a Branch Manager or head office deliberately removed. The one thing it *does* remove is a resource the role
     template explicitly excludes (`resources.py`'s `exclude`), because that's a standing policy
     ("a Cashier must never hold discount-override authority"), not a per-user customization
     someone might legitimately have made."""
+    from app.services import staff_sync_service
+
+    # Only resources new to a role's template since the last startup go out. Re-adding the whole
+    # template every time quietly undid every access a Branch Manager — or head office — took away.
+    new_for_role: dict[str, set[str]] = {}
+    for role in await Role.all():
+        template = resources_for_role(role.id)
+        if role.managed_by_head_office:
+            # Head office's list is this role's standard access; the software's defaults don't apply.
+            new_for_role[role.id] = set()
+        elif role.rolled_out_resources is None:
+            # First startup that keeps track: every earlier startup already handed out today's template.
+            new_for_role[role.id] = set()
+        else:
+            new_for_role[role.id] = template - set(role.rolled_out_resources)
+        if role.rolled_out_resources != sorted(template):
+            role.rolled_out_resources = sorted(template)
+            await role.save(update_fields=["rolled_out_resources"])
+
     for user in await User.all():
-        template_resources = resources_for_role(user.role_id)
-        granted = set(await UserPermission.filter(user=user).values_list("resource", flat=True))
-        for resource in template_resources - granted:
-            await UserPermission.create(
-                user=user, resource=resource, can_read=True, can_write=True, can_execute=True, granted_by=None,
-            )
+        changed = False
+        added = new_for_role.get(user.role_id, set())
+        if added:
+            granted = set(await UserPermission.filter(user=user).values_list("resource", flat=True))
+            exact = preset_grants(user.role_id)
+            for resource in added - granted:
+                actions = exact.get(resource, {"R", "W", "X"})
+                await UserPermission.create(
+                    user=user, resource=resource, can_read="R" in actions, can_write="W" in actions, can_execute="X" in actions, granted_by=None,
+                )
+                changed = True
         excluded = excluded_resources_for_role(user.role_id)
         if excluded:
-            await UserPermission.filter(user=user, resource__in=list(excluded)).delete()
+            removed = await UserPermission.filter(user=user, resource__in=list(excluded)).delete()
+            changed = changed or bool(removed)
+        if changed:
+            await staff_sync_service.emit(user.id)
 
     # The role's own template rows feed every *future* user created into that role, so a stale
     # row here would silently re-grant an excluded resource to the next hire.
@@ -254,3 +336,73 @@ async def sync_role_resource_grants() -> None:
         excluded = excluded_resources_for_role(role_id)
         if excluded:
             await RoleDefaultPermission.filter(role_id=role_id, resource__in=list(excluded)).delete()
+
+
+async def give_branch_managers_the_books() -> int:
+    """Once: every Branch Manager gets the accounts abilities, so the books have someone until an accountant is added.
+    After that it's the Branch Manager's to hand out or take away like any other tick."""
+    from app.core.abilities import ACCOUNTS_ABILITIES
+    from app.models import Counter
+    from app.services import staff_sync_service
+
+    if await Counter.exists(id="rollout:accounts-branch-managers"):
+        return 0
+    wanted: dict[str, set[str]] = {}
+    for resource, action in ACCOUNTS_ABILITIES:
+        wanted.setdefault(resource, set()).add(action)
+    for actions in wanted.values():
+        if actions & {"W", "X"}:
+            actions.add("R")
+    changed = 0
+    for user in await User.filter(role_id="branch-manager"):
+        touched = False
+        for resource, actions in wanted.items():
+            perm = await UserPermission.get_or_none(user=user, resource=resource)
+            if perm is None:
+                await UserPermission.create(user=user, resource=resource, can_read="R" in actions, can_write="W" in actions,
+                                            can_execute="X" in actions, granted_by=None)
+                touched = True
+            else:
+                before = (perm.can_read, perm.can_write, perm.can_execute)
+                perm.can_read = perm.can_read or "R" in actions
+                perm.can_write = perm.can_write or "W" in actions
+                perm.can_execute = perm.can_execute or "X" in actions
+                if (perm.can_read, perm.can_write, perm.can_execute) != before:
+                    await perm.save()
+                    touched = True
+        if touched:
+            changed += 1
+            await staff_sync_service.emit(user.id, None)
+    await Counter.create(id="rollout:accounts-branch-managers", value=1)
+    return changed
+
+
+async def give_managers_the_counter_board() -> int:
+    """Once: every Branch Manager gets the new ability to put people on counters.
+
+    The startup backfill above only notices resources that are new; `store.counters` was already
+    there as a read, so the write action that came with the Counter Board would never have reached
+    anybody. After this it is a tick like any other.
+    """
+    from app.models import Counter
+    from app.services import staff_sync_service
+
+    if await Counter.exists(id="rollout:counter-board"):
+        return 0
+    changed = 0
+    for user in await User.filter(role_id="branch-manager"):
+        perm = await UserPermission.get_or_none(user=user, resource="store.counters")
+        if perm is None:
+            await UserPermission.create(user=user, resource="store.counters", can_read=True, can_write=True,
+                                        can_execute=False, granted_by=None)
+        elif not perm.can_write:
+            perm.can_read = True
+            perm.can_write = True
+            await perm.save()
+        else:
+            continue
+        changed += 1
+        await staff_sync_service.emit(user.id, None)
+    await Counter.create(id="rollout:counter-board", value=1)
+    return changed
+

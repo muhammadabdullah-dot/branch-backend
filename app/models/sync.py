@@ -18,3 +18,6 @@ class OutboxEvent(models.Model):
 
     class Meta:
         table = "outbox_events"
+        # The sync loop asks the same question every tick — the oldest events still waiting — and this
+        # table only ever grows, so it is asked of an index rather than of every row.
+        indexes = (("status", "created_at"),)

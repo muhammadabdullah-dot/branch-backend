@@ -20,5 +20,27 @@ async def logout() -> dict:
 async def me(user: User) -> MeResponse:
     await user.fetch_related("role")
     permissions = await effective_permissions(user)
-    user_out = UserOut(id=str(user.id), name=user.name, email=user.email, roleId=user.role_id, landing=user.role.landing)
-    return MeResponse(user=user_out, permissions=permissions)
+    return MeResponse(user=await auth_service.user_out(user, permissions), permissions=permissions)
+
+
+async def change_password(user: User, payload) -> dict:
+    try:
+        await auth_service.change_own_password(user, payload.currentPassword, payload.newPassword, payload.confirmPassword)
+    except auth_service.AccountError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    from app.services import staff_sync_service
+
+    # Head office keeps every branch account; the new password works there after the next check-in.
+    await staff_sync_service.emit(user.id, user)
+    return {"detail": "Password changed"}
+
+
+async def change_name(user: User, payload) -> MeResponse:
+    try:
+        await auth_service.change_own_name(user, payload.name)
+    except auth_service.AccountError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    from app.services import staff_sync_service
+
+    await staff_sync_service.emit(user.id, user)
+    return await me(user)

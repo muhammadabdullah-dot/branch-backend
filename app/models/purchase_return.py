@@ -24,6 +24,9 @@ class PurchaseReturn(models.Model):
         "models.User", related_name="purchase_returns_submitted"
     )
     at = fields.DatetimeField(auto_now_add=True)
+    # What the supplier owes back for it (goods at the return price, plus their GST). Null on older returns.
+    total = fields.DecimalField(max_digits=14, decimal_places=2, null=True)
+    tax_total = fields.DecimalField(max_digits=14, decimal_places=2, null=True)
 
     class Meta:
         table = "purchase_returns"
@@ -39,6 +42,9 @@ class PurchaseReturnLine(models.Model):
     )
     qty = fields.DecimalField(max_digits=12, decimal_places=3)
     unit_price = fields.DecimalField(max_digits=12, decimal_places=2)
+    tax_rate = fields.DecimalField(max_digits=5, decimal_places=2, null=True)
+    # The shelf's average cost when it went back — what leaves stock in the books.
+    unit_cost = fields.DecimalField(max_digits=12, decimal_places=4, null=True)
 
     class Meta:
         table = "purchase_return_lines"

@@ -5,6 +5,12 @@ class Role(models.Model):
     id = fields.CharField(max_length=40, pk=True)
     name = fields.CharField(max_length=80)
     landing = fields.CharField(max_length=120)
+    # Set once head office has taken over this role's standard access. From then on the branch stops
+    # adding the software's own defaults back at startup — head office's list is the list.
+    managed_by_head_office = fields.BooleanField(default=False)
+    # The software's standard access for this role as last handed out to its people at startup. Only
+    # what's been added since goes out next time, so a screen someone deliberately took away stays away.
+    rolled_out_resources = fields.JSONField(null=True)
 
     class Meta:
         table = "roles"

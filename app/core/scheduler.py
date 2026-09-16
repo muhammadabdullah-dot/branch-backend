@@ -14,9 +14,11 @@ import asyncio
 import contextlib
 from datetime import datetime, timezone
 
+from app.core import logs
 from app.core.config import settings
 
 _task: asyncio.Task | None = None
+_quick_task: asyncio.Task | None = None
 
 
 async def _tick() -> int:
@@ -51,18 +53,38 @@ async def _loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — the loop must outlive anything one tick can do
-            print(f"  sync scheduler: tick failed ({type(exc).__name__}: {exc})", flush=True)
+            logs.log.error("sync scheduler: tick failed", exc_info=exc)
         await asyncio.sleep(max(delay, 30))
 
 
+async def _quick_loop() -> None:
+    """Every couple of minutes: collect what head office sent, then send this branch's pending events
+    (a receipt just confirmed, an account just changed). The figures stay on the slow loop above."""
+    from app.services import downstream_service, registration_service, sync_service
+
+    await asyncio.sleep(min(settings.sync_startup_delay_seconds, 20))
+    while True:
+        try:
+            if await registration_service.current() is not None:
+                await downstream_service.pull_once(triggered_by="quick")
+                await sync_service.push_events_once(triggered_by="quick")
+                await sync_service.push_stock_changes_once(triggered_by="quick")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — same rule as the main loop
+            logs.log.error("sync quick loop: tick failed", exc_info=exc)
+        await asyncio.sleep(max(settings.sync_quick_interval_seconds, 30))
+
+
 def start() -> None:
-    global _task
+    global _task, _quick_task
     if not settings.sync_enabled:
         print("  sync scheduler: disabled (SYNC_ENABLED=false)", flush=True)
         return
     if _task is not None and not _task.done():
         return
     _task = asyncio.create_task(_loop(), name="branch-sync-scheduler")
+    _quick_task = asyncio.create_task(_quick_loop(), name="branch-sync-quick")
     hours = settings.sync_interval_seconds / 3600
     print(
         f"  sync scheduler: every {hours:g}h "
@@ -73,13 +95,15 @@ def start() -> None:
 
 
 async def stop() -> None:
-    global _task
-    if _task is None:
-        return
-    _task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await _task
+    global _task, _quick_task
+    for task in (_task, _quick_task):
+        if task is None:
+            continue
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     _task = None
+    _quick_task = None
 
 
 def is_running() -> bool:
@@ -93,7 +117,11 @@ def next_run_hint() -> str:
     if not settings.sync_enabled:
         return "Automatic sync is switched off on this server."
     hours = settings.sync_interval_seconds / 3600
-    return f"Runs automatically every {hours:g} hours, and keeps retrying while the connection is down."
+    minutes = max(settings.sync_quick_interval_seconds, 30) / 60
+    return (
+        f"Checks head office for staff and transfer updates, and sends stock for items that moved, every {minutes:g} minutes. Figures go every "
+        f"{hours:g} hours, and it keeps retrying while the connection is down."
+    )
 
 
 def now() -> datetime:
