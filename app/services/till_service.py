@@ -39,8 +39,14 @@ async def get_current(user: User | None = None) -> TillSession | None:
 
 
 async def session_for(user: User) -> TillSession | None:
-    """The session a sale rung by this person belongs in."""
-    return await get_current(user)
+    """The drawer a sale rung by this person belongs in — their own, and only their own.
+
+    Deliberately stricter than `get_current`: that one falls back to the branch's single open till so a
+    manager looking at the Till screen sees something, which is right for a read and wrong for a sale.
+    Falling back here would quietly put one person's takings in somebody else's drawer, and the first
+    anybody would know of it is a variance at closing time.
+    """
+    return await TillSession.filter(status="open", opened_by_id=user.id).order_by("-opened_at").first()
 
 
 async def resolve_session(user: User, session_id: str | None) -> TillSession:
