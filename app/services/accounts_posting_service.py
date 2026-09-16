@@ -22,6 +22,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
+from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
 from app.models import (
@@ -47,6 +48,7 @@ from app.models import (
 from app.services import vouchers_service
 from app.services.accounts_chart_service import Resolver, money
 from app.services.accounts_reports_service import PKT, shop_day
+from app.services.till_service import LINKED_FROM
 
 ZERO = Decimal("0")
 WINDOW_DAYS = 10
@@ -229,11 +231,17 @@ async def _tills(run: Run) -> None:
                           f"Till {till.session_number} opened with its float", till.session_number, counter)
     for till in await TillSession.filter(status="closed", closed_at__gte=lo, closed_at__lt=hi):
         expected = Decimal(till.opening_float)
-        for sale in await SaleRecord.filter(at__gte=till.opened_at, at__lte=till.closed_at).prefetch_related("tenders"):
+        # This drawer's own bills. Several tills can be open at once, so a bill rung at the next counter during the
+        # same hours is not this drawer's cash. Drawers opened before bills carried their till also take the bills
+        # rung while they were open that belong to no till — the only way to tell back when one till was open.
+        mine = Q(till_session_id=till.id)
+        if till.opened_at < LINKED_FROM:
+            mine |= Q(till_session_id=None, at__gte=till.opened_at, at__lte=till.closed_at)
+        for sale in await SaleRecord.filter(mine).prefetch_related("tenders"):
             for tender in sale.tenders:
                 if tender.code == "CASH":
                     expected += Decimal(tender.amount) - Decimal(sale.cash_back or 0)
-        for ret in await ReturnRecord.filter(at__gte=till.opened_at, at__lte=till.closed_at, refund_method="CASH"):
+        for ret in await ReturnRecord.filter(mine, refund_method="CASH"):
             expected -= Decimal(ret.refund_total)
         for movement in await CashMovement.filter(till_session=till):
             expected += Decimal(movement.amount) if movement.kind == "in" else -Decimal(movement.amount)

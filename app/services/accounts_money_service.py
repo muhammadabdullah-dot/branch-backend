@@ -10,7 +10,7 @@ from decimal import Decimal
 from tortoise.transactions import atomic
 
 from app.core.device_context import get_device_id
-from app.models import Account, CashMovement, Cheque, CustomerPayment, OutboxEvent, Party, TillSession, User, next_value
+from app.models import Account, CashMovement, Cheque, CustomerPayment, OutboxEvent, Party, User, next_value
 from app.services import vouchers_service
 from app.services.accounts_chart_service import customer_account, money
 from app.services.accounts_reports_service import shop_day
@@ -56,9 +56,12 @@ async def receive_payment(user: User, party_id: str, amount: Decimal, method: st
     number = f"RCP-{seq:06d}"
     movement = None
     if method == "CASH":
-        till = await TillSession.get_or_none(status="open")
+        from app.services.till_service import session_for
+
+        # The drawer of whoever takes the money — with several tills open there is no single "the till".
+        till = await session_for(user)
         if not till:
-            raise MoneyError("Cash goes into the till — open the till first.")
+            raise MoneyError("Cash goes into your till — open your till first.")
         account = await customer_account(party)
         movement = await CashMovement.create(
             till_session=till, kind="in", amount=amount, denominations={}, user=user, account=account, payee=party.name,

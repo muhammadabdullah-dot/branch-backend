@@ -62,14 +62,16 @@ async def issue(face_value: Decimal, party_id: str | None, paid_by: str | None =
         code = f"GV-{random.randint(10000, 99999)}"
     reference = (reference or "").strip()[:60] or None
     if paid_by == "CASH":
-        from app.models import CashMovement, TillSession
+        from app.models import CashMovement
         from app.services.accounts_chart_service import Resolver
+        from app.services.till_service import session_for
 
-        till = await TillSession.get_or_none(status="open")
-        if not till:
-            raise VoucherError("Cash for a voucher goes into the till — open the till first.")
         if user is None:
             raise VoucherError("Who's taking the cash?")
+        # The drawer of whoever takes the money — with several tills open there is no single "the till".
+        till = await session_for(user)
+        if not till:
+            raise VoucherError("Cash for a voucher goes into your till — open your till first.")
         await CashMovement.create(
             till_session=till, kind="in", amount=face_value, denominations={}, user=user,
             account=await Resolver().key("liab.gift_vouchers"), payee=party.name if party else None,
