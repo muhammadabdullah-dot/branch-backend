@@ -15,7 +15,8 @@ suppliers, the item lists, the locations and payment methods stay. Then, dated w
               on 8 and 14 Sep for what sells faster than it came in
   selling     two counters, a morning and an afternoon drawer, walk-in and wholesale bills, card and wallet buyers
               signed up as members, a few returns, petty cash outs, drawers counted at close (a few rupees out)
-  books       opening balances on 31 Aug (cash, bank, fixtures, owner's capital), every automatic voucher, suppliers paid
+  books       head office opening the branch on 1 Sep (cash, bank, fit-out, rent deposit against the two current accounts),
+              wholesale customers paying (bank transfers, a cheque cleared), every automatic voucher, suppliers paid
               on their terms, rent, salaries and utilities to 15 Sep, card and wallet takings settled, safe cash banked
 
 What it sells is drawn from Model Town's own September, deliberately different: some of Model Town's best sellers
@@ -535,6 +536,31 @@ class FortColony:
         self.counts[f"{vtype} vouchers by hand"] += 1
         return posted
 
+    async def customer_money(self, bank) -> None:
+        from app.models import Party
+        from app.services import accounts_money_service
+        from app.services.accounts_chart_service import customer_account
+
+        by_name = {p.name: p for p in await Party.filter(tier="wholesale")}
+        plans = [("Hassan General Store", date(2026, 9, 10), "BANK", Decimal("150000"), "IBFT 8841207733"),
+                 ("Noor Kiryana Store", date(2026, 9, 16), "BANK", Decimal("40000"), "IBFT 8841990415")]
+        for name, day, method, amount, ref in plans:
+            party = by_name[name]
+            amount = min(amount, Decimal(party.credit_balance))
+            if amount <= 0:
+                continue
+            await self.stamped(at(day, 15, 20), lambda p=party, a=amount, m=method, r=ref: accounts_money_service.receive_payment(self.bm, str(p.id), a, m, r, "Part payment of September bills"))
+            self.counts["customer payments"] += 1
+        madni = by_name["Madni Wholesale Mart"]
+        amount = min(Decimal("200000"), Decimal(madni.credit_balance))
+        if amount > 0:
+            account = await customer_account(madni)
+            cheque = await self.stamped(at(date(2026, 9, 12), 16, 5), lambda: accounts_money_service.record_cheque(self.bm, {
+                "direction": "received", "partyAccountId": str(account.id), "amount": str(amount), "chequeNo": "10044817",
+                "drawnOn": "Meezan Bank, Hussain Agahi", "receivedOn": "2026-09-12", "chequeDate": "2026-09-14", "note": "Against September bills"}))
+            await self.stamped(at(date(2026, 9, 15), 12, 30), lambda: accounts_money_service.clear_cheque(self.bm, str(cheque.id), str(bank.id), "2026-09-15"))
+            self.counts["cheques received and cleared"] += 1
+
     async def balance(self, account, until: date) -> Decimal:
         conn = Tortoise.get_connection("default")
         rows = await conn.execute_query_dict(
@@ -552,20 +578,26 @@ class FortColony:
             say(f"posting problem: {problem}")
         acc = Resolver()
         A = {k: await acc.key(k) for k in ("cash.main", "cash.counter", "bank.main", "wallet.card", "wallet.easypaisa", "wallet.jazzcash",
-                                           "tax.wht_payable", "equity.capital", "expense.bank_charges")}
+                                           "tax.wht_payable", "expense.bank_charges")}
         for code in ("52040001", "52020001", "52030001", "52030002", "52030004", "52010006", "52010008", "53010002", "21040001", "21040002",
                      "12010001", "12010002", "12010003", "12010005", "12020001", "11060003"):
             A[code] = await Account.get(code=code)
         safe, bank = A["cash.main"], A["bank.main"]
 
-        # opening balances: what the owner put in before the doors opened
-        fixtures = [(A["12010001"], 1250000, "Shelving, counters and fixtures"), (A["12010002"], 420000, "POS terminals, scanners and a scale"),
-                    (A["12010003"], 290000, "Counter PCs and printers"), (A["12010005"], 760000, "Chillers and air conditioning"),
-                    (A["11060003"], 300000, "Rent security deposit with the landlord")]
-        opening = [(safe, 200000, 0, "Cash in the safe on opening"), (bank, 2600000, 0, "Bank balance on 31 Aug")] + [(a, v, 0, t) for a, v, t in fixtures]
-        capital = sum((Decimal(dr) for _a, dr, _c, _t in opening), ZERO)
-        opening.append((A["equity.capital"], 0, capital, "Owner's capital put into Fort Colony"))
-        await self.voucher(date(2026, 8, 31), "OB", opening, "Opening balances on 31 Aug 2026: cash, bank, fixtures and the owner's capital", reference="OPENING-FC", hour=18)
+        # Day one: head office opens the branch. It sends the money and pays for the fit-out and the rent deposit, and both books
+        # record it against their accounts with each other: here the head office current account, at head office Fort Colony's
+        # branch current account (load_branch_story.py posts that side). A branch has no capital of its own.
+        A["interoffice.head_office"] = await acc.key("interoffice.head_office")
+        self.funding = [(safe, 200000, "Cash for the safe and the opening floats"), (bank, 2600000, "Bank transfer from head office"),
+                        (A["12010001"], 1250000, "Shelving, counters and fixtures, paid by head office"),
+                        (A["12010002"], 420000, "POS terminals, scanners and a scale, paid by head office"),
+                        (A["12010003"], 290000, "Counter PCs and printers, paid by head office"),
+                        (A["12010005"], 760000, "Chillers and air conditioning, paid by head office"),
+                        (A["11060003"], 300000, "Rent security deposit, paid to the landlord by head office")]
+        funded = sum((Decimal(v) for _a, v, _t in self.funding), ZERO)
+        await self.voucher(START, "JV", [(a, v, 0, t) for a, v, t in self.funding] + [(A["interoffice.head_office"], 0, funded, "Put in by head office")],
+                           "Head office opens Fort Colony: cash, bank, fit-out and the rent deposit", reference="HO-FUNDING-FC", hour=9)
+        self.funded = funded
 
         # rent, internet, utilities and salaries to the middle of the month
         await self.voucher(date(2026, 9, 1), "JV", [(A["52040001"], 85000, 0, "Shop rent for September 2026"), (bank, 0, 76500, "Cheque to the landlord"),
@@ -576,6 +608,9 @@ class FortColony:
                                        (A["21040002"], 0, 14200, "Electricity owed"), (A["12020001"], 0, 11300, "Depreciation")],
                            "Costs to 15 September accrued for the mid-month review", "ACCRUAL-2026-09-15-FC", hour=13)
         await self.voucher(MID, "CPV", [(A["52010006"], 4000, 0, "Night guard and sweeper, 1 to 15 September")], "Cleaning and security contractor", header=safe, reference="CLEAN-SEP-FC", hour=11)
+
+        # wholesale customers paying what they owe: a bank transfer, a cheque received and cleared, another transfer
+        await self.customer_money(bank)
 
         # suppliers paid on their terms, Wednesdays and Saturdays
         paid = set()
@@ -667,7 +702,14 @@ class FortColony:
                            "originUserId": e.origin_user_id, "originDeviceId": e.origin_device_id,
                            "createdAt": e.created_at.isoformat() if e.created_at else None})
         events.sort(key=lambda e: (order[e["aggregateType"]], e["createdAt"] or ""))
-        path.write_text(json.dumps({"branch": FC["code"], "aggregates": aggregates, "stock": rows, "events": events}, default=str), encoding="utf-8")
+        # Head office's own side of opening the branch, for load_branch_story.py: the owner's added capital and the funding.
+        head_office = {"day": START.isoformat(), "ownerCapital": "2500000", "reference": "HO-FUNDING-FC",
+                       "funding": [{"amount": "200000", "text": "Cash for Fort Colony's safe and opening floats"},
+                                   {"amount": "2600000", "text": "Bank transfer to Fort Colony"},
+                                   {"amount": "2720000", "text": "Fort Colony's shelving, POS, computers, chillers and air conditioning"},
+                                   {"amount": "300000", "text": "Fort Colony's rent security deposit, paid to the landlord"}]}
+        path.write_text(json.dumps({"branch": FC["code"], "aggregates": aggregates, "stock": rows, "events": events, "headOffice": head_office},
+                                   default=str), encoding="utf-8")
         say(f"wrote {path}: {len(aggregates.get('daily', []))} trading days, {len(rows)} stock rows, {len(events)} events for head office")
 
 
