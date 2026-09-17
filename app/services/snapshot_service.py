@@ -24,10 +24,11 @@ from decimal import Decimal
 
 from tortoise import Tortoise
 
-# Branch trading days are stored shifted so that stored-UTC + 5 is the branch's own wall clock.
-# Converting here means the Cloud's hour-of-day profile reads as real shop hours (09:00-20:00)
-# instead of as a UTC artefact nobody in the shop recognises.
-PKT_OFFSET_HOURS = 5
+from app.core.pk_time import pk_day, today_pk
+
+# Times are stored as UTC instants. Every day and hour below is the Pakistan one, date(at, '+5 hours') and
+# strftime('%H', at, '+5 hours') (core/pk_time.py), the same as the branch's own Reports: a sale at 2 am is on the
+# day the shop was open, and the hour-of-day profile reads as real shop hours (09:00 to 20:00).
 
 # A dashboard is a glance. A real catalog can put thousands of items under the low-stock line, so
 # only the most urgent travel — `totalOfKind` carries the true count alongside.
@@ -38,6 +39,24 @@ NEAR_EXPIRY_DAYS = 30
 # Item-level stock is the one genuinely large payload: one row per catalog product. Chunked so a
 # dropped connection costs one chunk rather than the whole picture.
 STOCK_CHUNK_SIZE = 2000
+
+# Every line that moved an Item's sales, one row each on its Pakistan day: bill lines (goods handed back on a bill
+# count negative) and lines taken back on the Returns screen (negative, on the day they came back, against whoever
+# took them). A refund's value is what the customer paid less the GST inside it, so it nets against sales counted
+# before GST: the same rule as the branch's own Reports (branch_analytics_service). A refund is no bill: sale_id null.
+_ITEM_LINES = """
+    SELECT date(s.at, '+5 hours') AS day, sl.product_id AS product_id, s.id AS sale_id, s.cashier_id AS user_id,
+           CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END AS qty,
+           (CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * sl.unit_price - COALESCE(sl.disc_amount, 0) AS net_sales,
+           sl.unit_cost AS unit_cost
+    FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id
+    UNION ALL
+    SELECT date(r.at, '+5 hours'), rl.product_id, NULL, r.cashier_id,
+           -rl.qty,
+           -(rl.qty * rl.unit_price - COALESCE(rl.tax_amount, 0)),
+           rl.unit_cost
+    FROM return_lines rl JOIN return_records r ON r.id = rl.return_record_id
+"""
 
 
 async def _q(sql: str) -> list[dict]:
@@ -60,7 +79,7 @@ async def build_aggregates() -> dict:
     """Everything the Cloud's Executive dashboard is built from, in the shape its apply layer
     expects. Keys are camelCase because this crosses a wire, not a module boundary."""
     daily = await _q("""
-        SELECT date(at) AS day,
+        SELECT date(at, '+5 hours') AS day,
                COUNT(*)                     AS invoices,
                COALESCE(SUM(gross), 0)      AS gross_sales,
                COALESCE(SUM(disc_total), 0) AS disc_total,
@@ -69,48 +88,56 @@ async def build_aggregates() -> dict:
                COALESCE(SUM(cash_back), 0) AS cash_back,
                COUNT(DISTINCT CASE WHEN party_id IS NOT NULL THEN party_id END)     AS named_customers,
                MIN(at) AS first_sale_at, MAX(at) AS last_sale_at
-        FROM sale_records GROUP BY date(at)
+        FROM sale_records GROUP BY date(at, '+5 hours')
     """)
-    # Items returned on a bill count against the day's items and cost, not towards them.
+    # Items returned on a bill count against the day's items and cost, not towards them. So do items taken back on
+    # the Returns screen, on the day they came back (as the branch's own Reports count units).
     items = {r["day"]: r for r in await _q("""
-        SELECT date(s.at) AS day, COALESCE(SUM(CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END), 0) AS items_sold
-        FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id GROUP BY date(s.at)
+        SELECT day, COALESCE(SUM(qty), 0) AS items_sold FROM (
+            SELECT date(s.at, '+5 hours') AS day, CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END AS qty
+            FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id
+            UNION ALL
+            SELECT date(r.at, '+5 hours'), -rl.qty
+            FROM return_lines rl JOIN return_records r ON r.id = rl.return_record_id
+        ) GROUP BY day
     """)}
     # Cost of goods at each line's own cost when it was sold (the Item's average cost then), falling back to today's
-    # average only for sales from before that was kept.
+    # average only for sales from before that was kept. Returns-screen refunds are not taken off here: the day's net
+    # sales are what its bills took and don't take those refunds off either, so taking off their cost alone would
+    # overstate the day's gross profit. The per-Item figures below take both off.
     cogs = {r["day"]: r for r in await _q("""
-        SELECT date(s.at) AS day,
+        SELECT date(s.at, '+5 hours') AS day,
                COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * COALESCE(sl.unit_cost, p.avg_cost, 0)), 0) AS cogs
         FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id
-        JOIN products p ON p.id = sl.product_id GROUP BY date(s.at)
+        JOIN products p ON p.id = sl.product_id GROUP BY date(s.at, '+5 hours')
     """)}
     # Money by how it was paid: cash actually kept in the drawer (less change given), and credit put on account.
     # Card, wallet, bank, voucher and points payments are neither.
     tender_days = {r["day"]: r for r in await _q("""
-        SELECT date(s.at) AS day,
+        SELECT date(s.at, '+5 hours') AS day,
                COALESCE(SUM(CASE WHEN t.code = 'CASH' THEN t.amount ELSE 0 END), 0) AS cash_tendered,
                COALESCE(SUM(CASE WHEN t.code = 'CREDIT' THEN t.amount ELSE 0 END), 0) AS credit_sales
-        FROM sale_tenders t JOIN sale_records s ON s.id = t.sale_id GROUP BY date(s.at)
+        FROM sale_tenders t JOIN sale_records s ON s.id = t.sale_id GROUP BY date(s.at, '+5 hours')
     """)}
     returns_by_day = {r["day"]: r for r in await _q("""
-        SELECT date(at) AS day, COUNT(*) AS returns_count,
+        SELECT date(at, '+5 hours') AS day, COUNT(*) AS returns_count,
                COALESCE(SUM(refund_total), 0) AS returns_value
-        FROM return_records GROUP BY date(at)
+        FROM return_records GROUP BY date(at, '+5 hours')
     """)}
     tills = {r["day"]: r for r in await _q("""
-        SELECT date(closed_at) AS day, COUNT(*) AS tills_closed,
+        SELECT date(closed_at, '+5 hours') AS day, COUNT(*) AS tills_closed,
                COALESCE(SUM(variance), 0) AS till_variance
-        FROM till_sessions WHERE closed_at IS NOT NULL GROUP BY date(closed_at)
+        FROM till_sessions WHERE closed_at IS NOT NULL GROUP BY date(closed_at, '+5 hours')
     """)}
     cash = {r["day"]: r for r in await _q("""
-        SELECT date(at) AS day,
+        SELECT date(at, '+5 hours') AS day,
                COALESCE(SUM(CASE WHEN kind = 'in'  THEN amount ELSE 0 END), 0) AS cash_in,
                COALESCE(SUM(CASE WHEN kind = 'out' THEN amount ELSE 0 END), 0) AS cash_out
-        FROM cash_movements GROUP BY date(at)
+        FROM cash_movements GROUP BY date(at, '+5 hours')
     """)}
     staff = {r["day"]: r for r in await _q("""
-        SELECT date(at) AS day, COUNT(DISTINCT cashier_id) AS staff_on_duty
-        FROM sale_records GROUP BY date(at)
+        SELECT date(at, '+5 hours') AS day, COUNT(DISTINCT cashier_id) AS staff_on_duty
+        FROM sale_records GROUP BY date(at, '+5 hours')
     """)}
 
     daily_out = []
@@ -138,49 +165,50 @@ async def build_aggregates() -> dict:
         "day": r["day"], "cashierName": r["cashier_name"],
         "invoices": r["invoices"], "netSales": _s(r["net_sales"]),
     } for r in await _q("""
-        SELECT date(s.at) AS day, u.name AS cashier_name,
+        SELECT date(s.at, '+5 hours') AS day, u.name AS cashier_name,
                COUNT(*) AS invoices, COALESCE(SUM(s.net_value), 0) AS net_sales
         FROM sale_records s JOIN users u ON u.id = s.cashier_id
-        GROUP BY date(s.at), u.name
+        GROUP BY date(s.at, '+5 hours'), u.name
     """)]
 
     products = [{
         "day": r["day"], "sku": r["sku"], "name": r["name"],
         "department": r["department"], "category": r["category"], "brand": r["brand"],
         "qty": _s(r["qty"]), "netSales": _s(r["net_sales"]), "cogs": _s(r["cogs"]),
-    } for r in await _q("""
-        SELECT date(s.at) AS day, p.sku, p.name, p.department, p.category, p.brand,
-               COALESCE(SUM(CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END), 0) AS qty,
-               COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * sl.unit_price - COALESCE(sl.disc_amount, 0)), 0) AS net_sales,
-               COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * COALESCE(sl.unit_cost, p.avg_cost, 0)), 0) AS cogs
-        FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id
-        JOIN products p ON p.id = sl.product_id
-        GROUP BY date(s.at), p.sku
+    } for r in await _q(f"""
+        SELECT l.day, p.sku, p.name, p.department, p.category, p.brand,
+               COALESCE(SUM(l.qty), 0) AS qty,
+               COALESCE(SUM(l.net_sales), 0) AS net_sales,
+               COALESCE(SUM(l.qty * COALESCE(l.unit_cost, p.avg_cost, 0)), 0) AS cogs
+        FROM ({_ITEM_LINES}) l
+        JOIN products p ON p.id = l.product_id
+        GROUP BY l.day, p.sku
     """)]
 
-    # Who sold how much of each item, each day: the person is whoever rang the bill, as in `cashiers` above.
+    # Who sold how much of each item, each day: the person is whoever rang the bill, as in `cashiers` above, or
+    # whoever took the goods back on the Returns screen.
     product_cashiers = [{
         "day": r["day"], "sku": r["sku"], "cashierName": r["cashier_name"], "invoices": r["invoices"],
         "qty": _s(r["qty"]), "netSales": _s(r["net_sales"]), "cogs": _s(r["cogs"]),
-    } for r in await _q("""
-        SELECT date(s.at) AS day, p.sku, u.name AS cashier_name,
-               COUNT(DISTINCT s.id) AS invoices,
-               COALESCE(SUM(CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END), 0) AS qty,
-               COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * sl.unit_price - COALESCE(sl.disc_amount, 0)), 0) AS net_sales,
-               COALESCE(SUM((CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) * COALESCE(sl.unit_cost, p.avg_cost, 0)), 0) AS cogs
-        FROM sale_lines sl JOIN sale_records s ON s.id = sl.sale_id
-        JOIN products p ON p.id = sl.product_id
-        JOIN users u ON u.id = s.cashier_id
-        GROUP BY date(s.at), p.sku, u.name
+    } for r in await _q(f"""
+        SELECT l.day, p.sku, u.name AS cashier_name,
+               COUNT(DISTINCT l.sale_id) AS invoices,
+               COALESCE(SUM(l.qty), 0) AS qty,
+               COALESCE(SUM(l.net_sales), 0) AS net_sales,
+               COALESCE(SUM(l.qty * COALESCE(l.unit_cost, p.avg_cost, 0)), 0) AS cogs
+        FROM ({_ITEM_LINES}) l
+        JOIN products p ON p.id = l.product_id
+        JOIN users u ON u.id = l.user_id
+        GROUP BY l.day, p.sku, u.name
     """)]
 
     hourly = [{
-        "day": r["day"], "hour": (int(r["utc_hour"]) + PKT_OFFSET_HOURS) % 24,
+        "day": r["day"], "hour": int(r["hour"]),
         "invoices": r["invoices"], "netSales": _s(r["net_sales"]),
     } for r in await _q("""
-        SELECT date(at) AS day, cast(strftime('%H', at) AS int) AS utc_hour,
+        SELECT date(at, '+5 hours') AS day, cast(strftime('%H', at, '+5 hours') AS int) AS hour,
                COUNT(*) AS invoices, COALESCE(SUM(net_value), 0) AS net_sales
-        FROM sale_records GROUP BY date(at), utc_hour
+        FROM sale_records GROUP BY date(at, '+5 hours'), hour
     """)]
 
     till_closes = [{
@@ -190,7 +218,7 @@ async def build_aggregates() -> dict:
         "openingFloat": _s(r["opening_float"]), "netCash": _s(r["net_cash"]),
         "countedCash": _s(r["counted_cash"]), "variance": _s(r["variance"]),
     } for r in await _q("""
-        SELECT date(s.closed_at) AS day, s.session_number, u.name AS cashier_name, c.name AS counter_name,
+        SELECT date(s.closed_at, '+5 hours') AS day, s.session_number, u.name AS cashier_name, c.name AS counter_name,
                s.opened_at, s.closed_at, s.opening_float, s.net_cash, s.counted_cash, s.variance
         FROM till_sessions s LEFT JOIN users u ON u.id = s.opened_by_id
         LEFT JOIN sales_counters c ON c.id = s.counter_id
@@ -204,23 +232,23 @@ async def build_aggregates() -> dict:
         "day": r["day"], "cashierName": r["cashier_name"] or "-", "counterName": r["counter_name"],
         "spells": r["spells"], "minutes": int(r["minutes"] or 0),
     } for r in await _q("""
-        SELECT date(d.started_at) AS day, u.name AS cashier_name, c.name AS counter_name,
+        SELECT date(d.started_at, '+5 hours') AS day, u.name AS cashier_name, c.name AS counter_name,
                COUNT(*) AS spells,
                SUM((julianday(COALESCE(d.ended_at, CURRENT_TIMESTAMP)) - julianday(d.started_at)) * 1440) AS minutes
         FROM counter_duties d JOIN users u ON u.id = d.user_id
         JOIN sales_counters c ON c.id = d.counter_id
-        GROUP BY date(d.started_at), u.name, c.name
+        GROUP BY date(d.started_at, '+5 hours'), u.name, c.name
     """)]
 
     tenders = [{
         "day": r["day"], "code": r["code"], "name": r["name"],
         "uses": r["uses"], "amount": _s(r["amount"]),
     } for r in await _q("""
-        SELECT date(s.at) AS day, t.code, COALESCE(m.name, t.code) AS name,
+        SELECT date(s.at, '+5 hours') AS day, t.code, COALESCE(m.name, t.code) AS name,
                COUNT(*) AS uses, COALESCE(SUM(t.amount), 0) AS amount
         FROM sale_tenders t JOIN sale_records s ON s.id = t.sale_id
         LEFT JOIN payment_methods m ON m.code = t.code
-        GROUP BY date(s.at), t.code
+        GROUP BY date(s.at, '+5 hours'), t.code
     """)]
 
     overrides = [{
@@ -228,7 +256,7 @@ async def build_aggregates() -> dict:
         "cashierName": r["cashier_name"], "approvedBy": r["approved_by"],
         "gross": _s(r["gross"]), "discTotal": _s(r["disc_total"]), "netValue": _s(r["net_value"]),
     } for r in await _q("""
-        SELECT date(s.at) AS day, s.invoice_number, s.at, c.name AS cashier_name,
+        SELECT date(s.at, '+5 hours') AS day, s.invoice_number, s.at, c.name AS cashier_name,
                a.name AS approved_by, s.gross, s.disc_total, s.net_value
         FROM sale_records s
         LEFT JOIN users c ON c.id = s.cashier_id
@@ -236,12 +264,14 @@ async def build_aggregates() -> dict:
         WHERE s.discount_override_by_id IS NOT NULL
     """)]
 
+    # One row per line taken back. `refundTotal` is the whole return's refund, repeated on each of its lines as it
+    # always was (head office counts it once per return: executive_service.returns_detail).
     return_rows = [{
         "day": r["day"], "at": _iso(r["at"]), "againstInvoice": r["against_invoice"],
         "cashierName": r["cashier_name"], "refundTotal": _s(r["refund_total"]),
         "productName": r["product_name"], "productSku": r["product_sku"], "qty": _s(r["qty"]),
     } for r in await _q("""
-        SELECT date(r.at) AS day, r.at, s.invoice_number AS against_invoice,
+        SELECT date(r.at, '+5 hours') AS day, r.at, s.invoice_number AS against_invoice,
                u.name AS cashier_name, r.refund_total,
                p.name AS product_name, p.sku AS product_sku, rl.qty
         FROM return_records r
@@ -295,7 +325,8 @@ async def build_alerts() -> list[dict]:
         elif qty < level:
             low_stock.append({"sku": r["sku"], "name": r["name"], "qty": qty, "expiry": None, "detail": f"{qty} left"})
 
-    now = datetime.now(timezone.utc)
+    # Days to expiry are Pakistan calendar days: a batch expiring tomorrow says 1 day, whatever the hour now.
+    today = today_pk()
     near, expired = [], []
     for r in await _q("""
         SELECT p.sku, p.name, bt.expiry, bt.received_qty
@@ -310,7 +341,7 @@ async def build_alerts() -> list[dict]:
                 continue
         if exp.tzinfo is None:
             exp = exp.replace(tzinfo=timezone.utc)
-        days = (exp - now).days
+        days = (pk_day(exp) - today).days
         if days >= 0 and days > NEAR_EXPIRY_DAYS:
             continue  # plenty of shelf life — not an exception
         row = {"sku": r["sku"], "name": r["name"], "qty": Decimal(str(r["received_qty"] or 0)), "expiry": exp,
@@ -345,17 +376,19 @@ async def stock_rows(product_ids: list[str] | None = None) -> list[dict]:
         SELECT p.id, p.sku, p.name, p.department, p.category, p.brand,
                p.avg_cost, p.price,
                COALESCE(b.qty, 0)            AS qty,
-               s.last_sold_at, s.units_sold, s.days_with_sales,
+               s.last_sold_at, s.units_sold - COALESCE(rt.qty, 0) AS units_sold, s.days_with_sales,
                g.last_received_at
         FROM products p
         LEFT JOIN (SELECT product_id, SUM(qty) AS qty FROM stock_movements GROUP BY product_id) b
                ON b.product_id = p.id
         LEFT JOIN (SELECT sl.product_id,
-                          MAX(sr.at)                  AS last_sold_at,
-                          SUM(sl.qty)                 AS units_sold,
-                          COUNT(DISTINCT date(sr.at)) AS days_with_sales
+                          MAX(CASE WHEN sl.is_return THEN NULL ELSE sr.at END) AS last_sold_at,
+                          SUM(CASE WHEN sl.is_return THEN -sl.qty ELSE sl.qty END) AS units_sold,
+                          COUNT(DISTINCT CASE WHEN sl.is_return THEN NULL ELSE date(sr.at, '+5 hours') END) AS days_with_sales
                    FROM sale_lines sl JOIN sale_records sr ON sr.id = sl.sale_id
                    GROUP BY sl.product_id) s ON s.product_id = p.id
+        -- Units sold are net of returns, as everywhere else: goods handed back on a bill above, and on the Returns screen here.
+        LEFT JOIN (SELECT product_id, SUM(qty) AS qty FROM return_lines GROUP BY product_id) rt ON rt.product_id = p.id
         LEFT JOIN (SELECT product_id, MAX(at) AS last_received_at
                    FROM stock_movements WHERE qty > 0 GROUP BY product_id) g ON g.product_id = p.id
         {where}

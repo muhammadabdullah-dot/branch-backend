@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+from app.core.pk_time import pk_day, pk_time
 from app.services import branch_analytics_service as an
 from app.services.branch_analytics_service import (
     SQL_DAY,
@@ -1139,10 +1140,8 @@ def datetime_day(value) -> date | None:
         return None
     text = str(value).replace("T", " ")
     try:
-        at = datetime.fromisoformat(text)
-        if at.tzinfo is None:
-            return at.date()
-        return at.astimezone(an.PKT).date()
+        # A stored time is a UTC instant (with or without its zone written); its day is the Pakistan one.
+        return pk_day(datetime.fromisoformat(text))
     except ValueError:
         return as_day(text)
 
@@ -1286,7 +1285,7 @@ def _when(value) -> str:
 
 def _when_time(value) -> str:
     try:
-        at = datetime.fromisoformat(str(value).replace("T", " ")).astimezone(an.PKT)
+        at = pk_time(datetime.fromisoformat(str(value).replace("T", " ")))
     except ValueError:
         return str(value)
     return f"{day_label(at.date())}, {at.hour % 12 or 12}:{at.minute:02d} {'am' if at.hour < 12 else 'pm'}"

@@ -26,7 +26,7 @@ from decimal import Decimal
 
 from tortoise import Tortoise
 
-PKT = timezone(timedelta(hours=5))
+from app.core.pk_time import PKT, today_pk
 
 A_CUT = 0.80
 B_CUT = 0.95
@@ -54,7 +54,7 @@ async def q(sql: str, params: list | None = None) -> list[dict]:
 
 
 def shop_today() -> date:
-    return datetime.now(PKT).date()
+    return today_pk()
 
 
 # ── periods ─────────────────────────────────────────────────────────────────────────────────────

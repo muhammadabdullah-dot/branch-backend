@@ -18,11 +18,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from app.core.pk_time import PKT
 from app.models import GRN, GRNLine, Party, Product, ProductSupplier, ReturnLine, ReturnRecord, SaleLine, SaleRecord, SaleTender, User
 from app.services.inventory_service import in_window
 
 ZERO = Decimal("0")
-PKT = timezone(timedelta(hours=5))
 
 BILL_GROUPS = ("user", "date", "customer")
 LINE_GROUPS = ("item", "brand", "category", "department", "itemClass", "manufacturer", "supplier")

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from app.core.pk_time import day_start, pk_time
 from app.models import Adjustment, Notice, NoticeRead, PhysicalCount, PurchaseOrder, Transfer, User
 from app.services.rbac_service import grants_of
 
@@ -127,7 +128,7 @@ async def _purchasing(user: User, can) -> list[dict]:
         for po in late:
             out.append(_task(
                 f"po:{po.id}:late", "Purchasing", f"{po.po_number} from {po.supplier.name} is late",
-                f"Expected {_aware(po.expected_at):%d %b}. Receive what came, or chase the supplier.", "/inventory/receiving", po.expected_at, timedelta(0),
+                f"Expected {pk_time(po.expected_at):%d %b}. Receive what came, or chase the supplier.", "/inventory/receiving", po.expected_at, timedelta(0),
             ))
     return out
 
@@ -168,7 +169,7 @@ async def _accounts(user: User, can) -> list[dict]:
     if can("accounts.cheques", "W"):
         due = await Cheque.filter(status="pending", cheque_date__lte=shop_day()).order_by("cheque_date")
         if due:
-            since = datetime.combine(due[0].cheque_date, datetime.min.time(), tzinfo=timezone.utc) if isinstance(due[0].cheque_date, _date) else None
+            since = day_start(due[0].cheque_date) if isinstance(due[0].cheque_date, _date) else None
             out.append(_task(
                 "cheques:deposit", "Accounts", f"{len(due)} cheque{'' if len(due) == 1 else 's'} due to deposit",
                 "Their date has come. Deposit them and mark them cleared, or bounced.", "/accounts/cheques", since, timedelta(days=2),

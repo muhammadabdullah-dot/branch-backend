@@ -390,13 +390,14 @@ async def _transfers(run: Run) -> None:
                               f"{transfer.number} dispatched to {transfer.from_warehouse}", transfer.number)
             if received and transfer.dispatched_at and transfer.dispatched_at >= lo:
                 arrived = sum((_cost(l.qty_received or 0, l.unit_cost, l.product) for l in lines), ZERO)
-                when = transfer.received_at or transfer.updated_at
+                when = transfer.received_at or transfer.dispatched_at
                 await run.put(f"transfer-out-received:{transfer.id}", "TRV", shop_day(when),
                               [(head_office, arrived, ZERO, f"Received by {transfer.from_warehouse}"), (transit, ZERO, arrived, "Arrived")],
                               f"{transfer.number} received by {transfer.from_warehouse}", transfer.number)
                 missing = sum((_cost(Decimal(l.qty_sent) - Decimal(l.qty_received or 0), l.unit_cost, l.product) for l in lines), ZERO)
                 if missing > 0 and not transfer.dispute_open:
-                    await run.put(f"transfer-out-settled:{transfer.id}", "TRV", shop_day(transfer.updated_at),
+                    # Dated by when it arrived: the row's last save changes whenever it's touched, and would move the voucher.
+                    await run.put(f"transfer-out-settled:{transfer.id}", "TRV", shop_day(transfer.received_at or transfer.dispatched_at),
                                   [(await acc.key("loss.transit"), missing, ZERO, "Short on arrival"), (transit, ZERO, missing, "Short on arrival")],
                                   f"{transfer.number}: shortfall written off when the dispute was settled", transfer.number)
         elif received and transfer.received_at and transfer.received_at >= lo:

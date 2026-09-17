@@ -17,6 +17,7 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
+from app.core.pk_time import now_pk
 from app.models import Party, Product, ProductAlias
 
 Column = tuple[str, Callable[[dict], Any], int]  # title, value getter over a row dict, Excel column width
@@ -132,7 +133,7 @@ def _write_xlsx(title: str, columns: list[Column], rows: list[dict]) -> bytes:
 async def build(name: str, fmt: str, branch_label: str) -> tuple[bytes, str, str]:
     """(content, media type, file name)."""
     title, columns, rows = await LISTINGS[name]()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    stamp = now_pk().strftime("%Y%m%d-%H%M")
     base = f"{title.lower()}-{branch_label}-{stamp}"
     if fmt == "csv":
         content = await asyncio.to_thread(_write_csv, columns, rows)

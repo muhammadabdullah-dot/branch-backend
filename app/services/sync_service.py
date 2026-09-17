@@ -15,7 +15,8 @@ An event that fails to land is simply absent from that list and stays pending, s
 the next tick. Losing an event requires the Cloud to lie about having it. The one exception is an
 event the Cloud refuses over and over: the queue goes oldest first, so that one event would sit in
 front of everything the branch has to say for the rest of time. After a few refusals it is set
-aside — still here, with the reason written on it, but out of the way (`MAX_REFUSALS_PER_EVENT`).
+aside — still here, with the reason written on it, but out of the way (`MAX_REFUSALS_PER_EVENT`),
+and offered again on its own every half hour in case head office can take it by then (`HELD_RETRY_AFTER`).
 
 **Being offline is not an error.** A shop with no internet for a day is a Tuesday, not an incident.
 A failed tick records why, leaves everything pending, and the next tick picks up where it left off.
@@ -23,7 +24,6 @@ A failed tick records why, leaves everything pending, and the next tick picks up
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from tortoise.expressions import Q
 
 from app.core import logs
 from app.models import IDENTITY_PK, BranchIdentity, OutboxEvent, SyncState
@@ -40,6 +40,16 @@ BATCH_SIZE = 250
 # ten minutes of being refused, which no transient at head office lasts through, and short enough
 # that a branch is not stuck behind one bad event for a shift.
 MAX_REFUSALS_PER_EVENT = 5
+# How long a set-aside event rests before it is offered again. Head office problems get fixed (an
+# account that arrives later, a fix deployed), and an event nobody offers again never reaches it. It
+# keeps its refusal count, so one more refusal sets it aside again at once: the rest of the queue loses
+# at most one tick to it each half hour.
+HELD_RETRY_AFTER = timedelta(minutes=30)
+# Statuses the queue sends, and the ones still waiting to reach head office (set-aside events included).
+SENDABLE = ("pending", "failed")
+WAITING = (*SENDABLE, "held")
+# What a run says when another run took over its claim (see `_Claim`): it stops and that run carries on.
+TAKEN_OVER = "Another sync took over from this one, which had gone quiet for too long; that one carries on."
 
 # The last sync problem written to the log: a branch that is offline for a day fails the same way every few minutes,
 # and the log needs the first time and the recovery, not a line per attempt.
@@ -152,7 +162,14 @@ def _serialize(event: OutboxEvent) -> dict:
 
 
 async def pending_count() -> int:
-    return await OutboxEvent.filter(Q(status="pending") | Q(status="failed")).count()
+    """Everything not yet at head office, set-aside events included: they are still waiting, just less often."""
+    return await OutboxEvent.filter(status__in=WAITING).count()
+
+
+async def _requeue_held() -> int:
+    """Put set-aside events that have rested for `HELD_RETRY_AFTER` back in the queue for one more try."""
+    due = datetime.now(timezone.utc) - HELD_RETRY_AFTER
+    return await OutboxEvent.filter(status="held", last_attempt_at__lt=due).update(status="failed")
 
 
 async def ping(identity: BranchIdentity) -> tuple[bool, str | None]:
@@ -172,12 +189,34 @@ async def ping(identity: BranchIdentity) -> tuple[bool, str | None]:
     return True, None
 
 
-async def _claim(now: datetime, triggered_by: str) -> bool:
+class _Claim:
+    """The sync claim one run holds, known by the time it last wrote on it.
+
+    A run writes that time again as it goes (`beat`), so a long run that is still working never looks
+    abandoned to the next one. Putting the claim down (`release`) only works while that time is still
+    this run's own: if another run took over, its claim is left standing."""
+
+    def __init__(self, stamp: datetime) -> None:
+        self.stamp = stamp
+
+    async def beat(self) -> bool:
+        """Refresh the claim. False when it is no longer this run's."""
+        now = datetime.now(timezone.utc)
+        if await SyncState.filter(id=IDENTITY_PK, running=True, last_attempt_at=self.stamp).update(last_attempt_at=now):
+            self.stamp = now
+            return True
+        return False
+
+    async def release(self) -> None:
+        await SyncState.filter(id=IDENTITY_PK, running=True, last_attempt_at=self.stamp).update(running=False)
+
+
+async def _claim(now: datetime, triggered_by: str) -> _Claim | None:
     claimed = await SyncState.filter(id=IDENTITY_PK, running=False).update(
         running=True, last_attempt_at=now,
     )
     if claimed:
-        return True
+        return _Claim(now)
     # Someone holds the lock. Either a run really is in flight, or a previous run was killed
     # mid-flight and never released it — a process killed with SIGKILL never reaches a `finally`.
     # Without this, one hard kill would leave the branch permanently convinced a sync is running
@@ -192,7 +231,7 @@ async def _claim(now: datetime, triggered_by: str) -> bool:
             f"(no progress for {STALE_LOCK_AFTER}); taking over.",
             flush=True,
         )
-    return bool(recovered)
+    return _Claim(now) if recovered else None
 
 
 async def run_once(*, triggered_by: str = "scheduler") -> SyncResult:
@@ -212,38 +251,47 @@ async def run_once(*, triggered_by: str = "scheduler") -> SyncResult:
     # two presses a few milliseconds apart can both pass the check — which is exactly the case
     # somebody double-clicking a button produces. `update()` returns the number of rows it changed,
     # so only one caller can win.
-    if not await _claim(now, triggered_by):
+    claim = await _claim(now, triggered_by)
+    if claim is None:
         result.skipped_reason = "A sync is already running."
         return result
 
-    state = await SyncState.get(id=IDENTITY_PK)
-
     try:
+        await _requeue_held()
         result.pending_before = await pending_count()
-        await _drain(identity, result)
+        await _drain(identity, result, claim)
         # The snapshot goes even when the event drain hit trouble, as long as the link is up at
         # all: the two carry different things, and refusing to update head office's figures because
         # one event would not stick would be punishing the wrong thing.
-        await _push_snapshot(identity, result)
-        result.ok = result.error is None
+        if not result.skipped_reason:
+            await _push_snapshot(identity, result, claim)
+        result.ok = result.error is None and result.skipped_reason is None
     finally:
         # `running` must come down even if something above threw, or one crash leaves this branch
-        # permanently convinced a sync is in progress and it never syncs again.
-        state.running = False
+        # permanently convinced a sync is in progress and it never syncs again. Only this run's own
+        # claim, though (see `_Claim`).
+        await claim.release()
+        # A fresh read and a save naming only what this run changed: the quick loop's pull moves its
+        # cursor and acknowledgements on this same row meanwhile, and a whole-row save would rewind them.
+        state = await SyncState.get(id=IDENTITY_PK)
+        fields = ["events_sent"]
         if result.stock_mark is not None:
             state.stock_mark, state.stock_mark_at = result.stock_mark, result.stock_mark_at
+            fields += ["stock_mark", "stock_mark_at"]
         if result.ok:
             state.last_success_at = datetime.now(timezone.utc)
             state.last_error = None
             state.consecutive_failures = 0
+            fields += ["last_success_at", "last_error", "consecutive_failures"]
         elif result.error:
             state.last_error = result.error
             state.consecutive_failures += 1
+            fields += ["last_error", "consecutive_failures"]
         # Net new, not raw acknowledgements. A re-sent event that head office already had is a
         # success, but counting it again would let this figure drift above the number of things
         # that ever happened in the branch — and the person reading it compares it to their day.
         state.events_sent += max(result.sent - result.duplicates, 0)
-        await state.save()
+        await state.save(update_fields=fields)
 
     result.pending_after = await pending_count()
     if result.ok:
@@ -267,23 +315,28 @@ async def push_events_once(*, triggered_by: str = "quick") -> SyncResult:
     if identity is None:
         result.skipped_reason = "This branch server isn't verified yet."
         return result
+    await _requeue_held()
     result.pending_before = await pending_count()
-    if not result.pending_before:
+    # Set-aside events count as pending but aren't sent until they are due again, so they alone are no
+    # reason to take the claim.
+    if not await OutboxEvent.filter(status__in=SENDABLE).exists():
+        result.pending_after = result.pending_before
         result.ok = True
         return result
     await SyncState.get_or_create(id=IDENTITY_PK)
     now = datetime.now(timezone.utc)
-    if not await _claim(now, triggered_by):
+    claim = await _claim(now, triggered_by)
+    if claim is None:
         result.skipped_reason = "A sync is already running."
         return result
     try:
-        await _drain(identity, result)
-        result.ok = result.error is None
+        await _drain(identity, result, claim)
+        result.ok = result.error is None and result.skipped_reason is None
     finally:
+        await claim.release()
         state = await SyncState.get(id=IDENTITY_PK)
-        state.running = False
         state.events_sent += max(result.sent - result.duplicates, 0)
-        fields = ["running", "events_sent"]
+        fields = ["events_sent"]
         if result.error:
             # This is the loop most problems actually show up on — it runs every couple of minutes,
             # the full run only every two hours — so its reason has to reach the status screen too.
@@ -319,7 +372,8 @@ async def push_stock_changes_once(*, triggered_by: str = "quick") -> int:
     ids, mark = await snapshot_service.changed_product_ids(state.stock_mark, state.stock_mark_at - timedelta(minutes=5))
     if not ids or len(ids) > STOCK_CHANGES_MAX:
         return 0
-    if not await _claim(started, triggered_by):
+    claim = await _claim(started, triggered_by)
+    if claim is None:
         return 0
     sent = 0
     new_mark: tuple[int, datetime] | None = None
@@ -331,6 +385,9 @@ async def push_stock_changes_once(*, triggered_by: str = "quick") -> int:
         rows = await snapshot_service.stock_rows(ids)
         async with httpx.AsyncClient(timeout=SNAPSHOT_TIMEOUT_SECONDS) as client:
             for chunk in snapshot_service.chunked(rows):
+                if not await claim.beat():
+                    # Another run took over; stopping here leaves the mark where it was.
+                    break
                 response = await client.post(
                     f"{identity.cloud_url}/sync/stock/changes", json={"rows": chunk}, headers=_headers(identity),
                 )
@@ -356,17 +413,18 @@ async def push_stock_changes_once(*, triggered_by: str = "quick") -> int:
             "It will go again next time."
         )
     finally:
+        await claim.release()
         # Fresh read: a full run may have moved the mark meanwhile, and only this run's own result is saved.
         latest = await SyncState.get(id=IDENTITY_PK)
-        latest.running = False
-        fields = ["running"]
+        fields = []
         if new_mark and new_mark[0] >= latest.stock_mark:
             latest.stock_mark, latest.stock_mark_at = new_mark
             fields += ["stock_mark", "stock_mark_at"]
         if problem:
             latest.last_error = problem
             fields.append("last_error")
-        await latest.save(update_fields=fields)
+        if fields:
+            await latest.save(update_fields=fields)
     if problem:
         _note_sync_error(triggered_by, problem)
     elif sent:
@@ -374,11 +432,14 @@ async def push_stock_changes_once(*, triggered_by: str = "quick") -> int:
     return sent
 
 
-async def _drain(identity: BranchIdentity, result: SyncResult) -> None:
+async def _drain(identity: BranchIdentity, result: SyncResult, claim: _Claim) -> None:
     async with httpx.AsyncClient(timeout=PUSH_TIMEOUT_SECONDS) as client:
         for _ in range(MAX_BATCHES_PER_RUN):
+            if not await claim.beat():
+                result.skipped_reason = TAKEN_OVER
+                return
             events = (
-                await OutboxEvent.filter(Q(status="pending") | Q(status="failed"))
+                await OutboxEvent.filter(status__in=SENDABLE)
                 .order_by("created_at")
                 .limit(BATCH_SIZE)
             )
@@ -443,27 +504,29 @@ async def _drain(identity: BranchIdentity, result: SyncResult) -> None:
                     event.status = "held"
                     event.last_error = (
                         f"Head office refused this event {event.attempt_count} times, so it has been set "
-                        "aside to let the rest of the queue go. It is still here and can be sent again "
-                        "once head office can take it."
+                        "aside to let the rest of the queue go. It is still here and is offered again "
+                        "on its own every half hour until head office takes it."
                     )[:500]
                     await event.save(update_fields=["status", "last_error"])
-                if set_aside:
+                # Logged the first time only: one set aside again after its half-hourly try is not news.
+                newly = [e for e in set_aside if e.attempt_count == MAX_REFUSALS_PER_EVENT]
+                if newly:
                     logs.log.warning(
                         "sync: %s event(s) head office would not store, set aside after %s refusals (first: %s %s, event %s)",
-                        len(set_aside), MAX_REFUSALS_PER_EVENT,
-                        set_aside[0].aggregate_type, set_aside[0].aggregate_id, set_aside[0].id,
+                        len(newly), MAX_REFUSALS_PER_EVENT,
+                        newly[0].aggregate_type, newly[0].aggregate_id, newly[0].id,
                     )
                 result.set_aside += len(set_aside)
                 result.error = (
                     f"{len(set_aside)} event(s) head office would not store have been set aside so the "
-                    f"rest of the queue can go; see the log for which."
+                    f"rest of the queue can go, and are offered again every half hour; see the log for which."
                     if set_aside else
                     f"{len(unconfirmed)} event(s) weren't confirmed by head office and stay queued."
                 )
                 return
 
 
-async def _push_snapshot(identity: BranchIdentity, result: SyncResult) -> None:
+async def _push_snapshot(identity: BranchIdentity, result: SyncResult, claim: _Claim) -> None:
     """Send head office this branch's own picture of itself: trading days, product-days, cashiers,
     hours, till closes, tenders, overrides, returns, credit customers, alerts — then the item-level
     stock list in chunks.
@@ -480,6 +543,10 @@ async def _push_snapshot(identity: BranchIdentity, result: SyncResult) -> None:
         rows = await snapshot_service.stock_rows()
     except Exception as exc:  # noqa: BLE001 — a bad fold must not take the whole sync down
         result.error = result.error or f"Couldn't build this branch's figures ({type(exc).__name__})."
+        return
+    # Building the figures is the slowest part of a run, so the claim is refreshed straight after it.
+    if not await claim.beat():
+        result.skipped_reason = TAKEN_OVER
         return
 
     snapshot_id = snapshot_service.new_snapshot_id()
@@ -499,6 +566,9 @@ async def _push_snapshot(identity: BranchIdentity, result: SyncResult) -> None:
             # office showing the last complete stock picture, not half a shop.
             sent_rows = 0
             for chunk in snapshot_service.chunked(rows):
+                if not await claim.beat():
+                    result.skipped_reason = TAKEN_OVER
+                    return
                 chunk_response = await client.post(
                     f"{identity.cloud_url}/sync/stock",
                     json={"snapshotId": snapshot_id, "rows": chunk}, headers=_headers(identity),

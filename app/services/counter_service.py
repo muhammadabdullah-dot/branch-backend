@@ -14,12 +14,12 @@ from decimal import Decimal
 from tortoise.expressions import Q
 from tortoise.transactions import atomic
 
+from app.core.pk_time import PKT
 from app.core.device_context import get_device_id
 from app.models import CashMovement, CounterDuty, OutboxEvent, ReturnRecord, SaleRecord, SalesCounter, TillSession, User
 
 ZERO = Decimal("0")
-# The shop's own day. Sales are stamped in UTC; Pakistan keeps no daylight saving, so one offset is enough.
-PKT = timezone(timedelta(hours=5))
+# The shop's own day is Pakistan's (core/pk_time.py). Sales are stamped in UTC; Pakistan keeps no daylight saving.
 
 
 class CounterError(Exception):

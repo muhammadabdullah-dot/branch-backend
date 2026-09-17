@@ -16,6 +16,7 @@ from decimal import Decimal
 from tortoise.functions import Sum
 from tortoise.transactions import atomic
 
+from app.core.pk_time import today_pk
 from app.core.device_context import get_device_id
 from app.models import KnownBranch, OutboxEvent, Product, ReturnLine, SaleLine, StockMovement, User, next_value
 from app.models.requisition import StockRequest, StockRequestLine
@@ -237,7 +238,7 @@ async def send(user: User, request_id: str) -> StockRequest:
         raise RequestError("Add at least one Item to the request.")
     if not (request.reason or "").strip():
         raise RequestError("Say why the stock is needed, so head office can decide.")
-    if request.needed_by and request.needed_by < _now().date():
+    if request.needed_by and request.needed_by < today_pk():
         raise RequestError("The needed-by date has passed. Pick today or a later day.")
     await _check_source(request.source_code)
     cover = await cover_for([str(line.product_id) for line in request.lines])

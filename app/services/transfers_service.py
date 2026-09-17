@@ -290,6 +290,22 @@ async def dispatch_outbound(
             raise TransferError(f"{location.name} only holds {held.normalize():f} of {product.name}; can't send {qty.normalize():f}.")
         products[product_id] = product
 
+    # A second click, a browser retry or another tab: the same person asked to send the same thing a moment ago and it
+    # hasn't left yet, so hand back that shipment instead of asking to send the stock twice.
+    from datetime import timedelta
+
+    since = _now() - timedelta(seconds=60)
+    wanted = sorted((str(product_id), Decimal(qty)) for product_id, qty in lines)
+    recent = await Transfer.filter(
+        direction="outbound", origin="branch", requested_by_id=user.id, counterparty_code=destination.code, location_id=location.id,
+        status__in=["awaiting_approval", "requested", "approved"],
+    ).order_by("-requested_at").limit(5).prefetch_related("lines")
+    for earlier in recent:
+        if _aware(earlier.requested_at) < since:
+            break
+        if sorted((str(l.product_id), l.qty_sent) for l in earlier.lines) == wanted:
+            return earlier
+
     now = _now()
     seq = await next_value("transfer_out", 1)
     can_approve = await has_permission(user, "inventory.transfers.approve", "X")
@@ -499,7 +515,18 @@ async def apply_inbound(state: dict) -> str:
             await _notify("transfer.dispute_settled", transfer, f"Dispute on {_label(transfer)} settled", transfer.dispute_note, RECEIVERS, tone="good")
         return "dispute-updated"
     incoming_status = state.get("status") or "approved"
-    if transfer and not _moves_forward(transfer.status, incoming_status):
+    if incoming_status in ("received", "received_short"):
+        # Only this branch's own count marks a shipment received here, because that count is what puts the stock on the
+        # shelves. Head office saying "received" (say, after a backup was restored here) leaves it to be counted in again.
+        from app.core import logs
+
+        kept = transfer.status if transfer else "dispatched"
+        logs.log.warning("transfer %s: head office says %s but this branch has it as %s; kept %s", state.get("number") or transfer_id,
+                         incoming_status, transfer.status if transfer else "missing", kept)
+        incoming_status = kept
+    if transfer and transfer.status == "cancelled" and incoming_status in ("dispatched", "in_transit") and state.get("reinstatedByHeadOffice"):
+        pass  # head office undid a cancel that came too late: the sender had already sent it, and no stock moved here for the cancel
+    elif transfer and not _moves_forward(transfer.status, incoming_status):
         incoming_status = transfer.status
     if transfer and transfer.status == "held" and incoming_status in OPEN_INBOUND:
         incoming_status = "held"  # a hold made here stays until someone here releases it

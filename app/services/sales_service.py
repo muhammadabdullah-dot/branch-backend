@@ -8,6 +8,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from tortoise.transactions import atomic
 
 from app.core.device_context import get_device_id
+from app.core.pk_time import now_pk, today_pk
 from app.models import (
     Location,
     OutboxEvent,
@@ -74,9 +75,7 @@ async def peek_next_invoice_number() -> str:
 def _invoice_year() -> int:
     """The branch's own trading year, not the server's UTC one — Pakistan is UTC+5, so a sale rung
     at half past nine in the evening on 31 December is still last year's bill."""
-    from datetime import datetime, timedelta, timezone
-
-    return datetime.now(timezone(timedelta(hours=5))).year
+    return today_pk().year
 
 
 async def _resolve_party(party_id: str | None) -> Party:
@@ -93,7 +92,7 @@ async def _resolve_party(party_id: str | None) -> Party:
 
 def save_payment_proof(content: bytes) -> str:
     """Keep a customer's transfer screenshot and return the id the sale will refer to."""
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    stamp = now_pk().strftime("%Y%m%d")
     return media_service.save_picture(PROOF_FOLDER, stamp, content, max_bytes=PROOF_MAX_BYTES)
 
 

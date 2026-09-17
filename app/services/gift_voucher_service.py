@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from tortoise.transactions import atomic
 
+from app.core.pk_time import pk_time
 from app.models import GiftVoucher, Party, VoucherRedemption
 from app.services.inventory_service import in_window
 
@@ -165,7 +166,7 @@ async def refusal_for(voucher: GiftVoucher, party_id: str | None, *, link: bool 
     if voucher.status != "active":
         return f"Voucher {voucher.code} is {voucher.status} and can't be used."
     if voucher.expires_at and voucher.expires_at < datetime.now(timezone.utc):
-        return f"Voucher {voucher.code} expired on {voucher.expires_at:%d %b %Y}."
+        return f"Voucher {voucher.code} expired on {pk_time(voucher.expires_at):%d %b %Y}."
     if voucher.balance <= 0:
         return f"Voucher {voucher.code} has no balance left."
 
