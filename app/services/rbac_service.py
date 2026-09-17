@@ -3,7 +3,7 @@ from tortoise.transactions import in_transaction
 
 from decimal import Decimal
 
-from app.core.abilities import ABILITIES, GROUPS, PRESETS, normalise, preset_grants, preset_limit
+from app.core.abilities import AREA_COLUMNS, AREAS, AREAS_GROUP, ABILITIES, GROUPS, PRESETS, normalise, preset_grants, preset_limit
 from app.core.resources import RESOURCES, excluded_resources_for_role, resources_for_role
 from app.core.security import hash_password
 from app.models import Role, RoleDefaultPermission, User, UserPermission
@@ -45,12 +45,17 @@ async def grants_of(user: User) -> dict[str, set[str]]:
 
 
 def abilities_catalog() -> dict:
+    """Every tick, grouped as the access screen shows it. The account areas also come as a grid (an area a row, See and
+    Use the columns), which is how they read best."""
     return {
         "groups": [
             {"key": key, "label": label, "abilities": [
                 {"key": f"{resource}:{action}", "resource": resource, "action": action, "label": text, "hint": hint}
                 for group, resource, action, text, hint in ABILITIES if group == key
-            ]}
+            ], **({"grid": {
+                "columns": [{"action": action, "label": text} for action, text in AREA_COLUMNS],
+                "rows": [{"resource": f"accounts.area.{area}", "label": text, "hint": hint} for area, text, hint in AREAS],
+            }} if key == AREAS_GROUP else {})}
             for key, label in GROUPS
         ],
         "presets": [

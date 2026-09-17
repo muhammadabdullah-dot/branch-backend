@@ -31,7 +31,7 @@ def _yes(value: Any) -> str:
 _ITEM_FIELDS = (
     "id", "sku", "name", "barcode", "brand", "category", "item_class", "subclass", "department", "manufacturer",
     "unit", "pack_unit", "pack_size", "price", "rpp", "tax_rate", "avg_cost", "disc_percent", "disc_flat",
-    "lock_disc", "variant", "origin", "active",
+    "lock_disc", "variant", "origin", "active", "wholesale_price", "reorder_level",
 )
 _ITEM_COLUMNS: list[Column] = [
     ("Code", lambda r: r["sku"], 14), ("Item name", lambda r: r["name"], 42), ("Barcode", lambda r: r["barcode"], 16),
@@ -39,10 +39,12 @@ _ITEM_COLUMNS: list[Column] = [
     ("Sub-class", lambda r: r["subclass"], 18), ("Department", lambda r: r["department"], 14),
     ("Manufacturer", lambda r: r["manufacturer"], 22), ("Unit", lambda r: r["unit"], 8), ("Pack unit", lambda r: r["pack_unit"], 10),
     ("Units per pack", lambda r: r["pack_size"], 10), ("Sale price", lambda r: r["price"], 11), ("Retail price", lambda r: r["rpp"], 11),
+    ("Wholesale price", lambda r: r["wholesale_price"], 11),
     ("GST %", lambda r: r["tax_rate"], 7), ("Average cost", lambda r: r["avg_cost"], 12), ("Item disc %", lambda r: r["disc_percent"], 9),
     ("Item flat disc", lambda r: r["disc_flat"], 10), ("Lock discount", lambda r: _yes(r["lock_disc"]), 9),
     ("Variant", lambda r: r["variant"], 10), ("Imported / local", lambda r: (r["origin"] or "").title() or None, 10),
-    ("Active", lambda r: _yes(r["active"]), 7), ("Alternate barcodes", lambda r: r.get("alias_codes"), 30),
+    ("Active", lambda r: _yes(r["active"]), 7), ("Reorder level", lambda r: r["reorder_level"], 9),
+    ("Alternate barcodes", lambda r: r.get("alias_codes"), 30),
 ]
 
 _PARTY_FIELDS = (

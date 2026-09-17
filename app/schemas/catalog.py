@@ -49,6 +49,10 @@ class ProductOut(BaseModel):
     hasPicture: bool = False
     parentId: str | None = None
     parentQty: Decimal | None = None
+    # Blank: wholesale bills take the branch's wholesale discount off the sale price.
+    wholesalePrice: Money | None = None
+    # Blank: the branch's usual low stock level.
+    reorderLevel: Decimal | None = None
     # Set only by the code lookup, when the code scanned was an alternate barcode: that pack's
     # quantity and discount, so a carton scan can ring up the carton rather than one unit.
     matchedAlias: ProductAliasOut | None = None
@@ -117,6 +121,8 @@ class ProductCreate(BaseModel):
     remarks: str | None = Field(default=None, max_length=255)
     parentId: str | None = None
     parentQty: Decimal | None = Field(default=None, gt=0)
+    wholesalePrice: Decimal | None = Field(default=None, ge=0)
+    reorderLevel: Decimal | None = Field(default=None, ge=0)
 
 
 class ProductUpdate(BaseModel):
@@ -146,6 +152,8 @@ class ProductUpdate(BaseModel):
     remarks: str | None = Field(default=None, max_length=255)
     parentId: str | None = None
     parentQty: Decimal | None = Field(default=None, gt=0)
+    wholesalePrice: Decimal | None = Field(default=None, ge=0)
+    reorderLevel: Decimal | None = Field(default=None, ge=0)
 
 
 class ProductAliasIn(BaseModel):
@@ -172,6 +180,8 @@ class CatalogFacetsOut(BaseModel):
     brands: list[str]
     units: list[str]
     packUnits: list[str]
+    # Switched-on GST rates, written the short way ("0", "17", "18").
+    gstRates: list[str] = []
     variants: list[str]
 
 
@@ -194,25 +204,36 @@ class SupplierOut(BaseModel):
     name: str
     contactPerson: str | None = None
     phone: str | None = None
+    phone2: str | None = None
     email: str | None = None
     address: str | None = None
     city: str | None = None
     ntn: str | None = None
     sTaxRegNo: str | None = None
+    cnic: str | None = None
     dueDays: int = 0
+    discountPercent: Money = Decimal("0")
     remarks: str | None = None
     active: bool = True
+    # The company list: head office's identity for it (empty until head office has it), and where it was added.
+    companyId: str | None = None
+    # "head-office", "this-branch" or "other-branch"
+    origin: str = "this-branch"
+    originName: str | None = None
 
 
 class SupplierFields(BaseModel):
     contactPerson: str | None = Field(default=None, max_length=120)
     phone: str | None = Field(default=None, max_length=30)
+    phone2: str | None = Field(default=None, max_length=30)
     email: str | None = Field(default=None, max_length=180)
     address: str | None = Field(default=None, max_length=255)
     city: str | None = Field(default=None, max_length=80)
     ntn: str | None = Field(default=None, max_length=40)
     sTaxRegNo: str | None = Field(default=None, max_length=40)
+    cnic: str | None = Field(default=None, max_length=40)
     dueDays: int = Field(default=0, ge=0, le=365)
+    discountPercent: Decimal = Field(default=Decimal("0"), ge=0, le=100)
     remarks: str | None = Field(default=None, max_length=255)
 
 
@@ -227,11 +248,14 @@ class SupplierUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
     contactPerson: str | None = Field(default=None, max_length=120)
     phone: str | None = Field(default=None, max_length=30)
+    phone2: str | None = Field(default=None, max_length=30)
     email: str | None = Field(default=None, max_length=180)
     address: str | None = Field(default=None, max_length=255)
     city: str | None = Field(default=None, max_length=80)
     ntn: str | None = Field(default=None, max_length=40)
     sTaxRegNo: str | None = Field(default=None, max_length=40)
+    cnic: str | None = Field(default=None, max_length=40)
     dueDays: int | None = Field(default=None, ge=0, le=365)
+    discountPercent: Decimal | None = Field(default=None, ge=0, le=100)
     remarks: str | None = Field(default=None, max_length=255)
     active: bool | None = None

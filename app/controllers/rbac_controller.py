@@ -52,7 +52,7 @@ async def update_user(user_id: str, payload: UserUpdateRequest, caller: User) ->
         if user_id == str(caller.id) and "discountLimit" in data:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "You can't change your own discount limit.")
         if user_id == str(caller.id) and data.get("password"):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Change your own password from My account — it needs your current password.")
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Change your own password from My account, because it needs your current password.")
         user = await rbac_service.update_user(
             user_id, name=data.get("name"), email=(str(data["email"]) if data.get("email") else None),
             active=data.get("active"), password=data.get("password"), title=data.get("title"),
@@ -82,7 +82,7 @@ async def get_permissions(user_id: str):
 
 async def update_permissions(user_id: str, payload: UpdatePermissionsRequest, caller: User):
     if user_id == str(caller.id):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot edit your own permissions")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can't change your own access. Ask another manager.")
     try:
         permissions = await rbac_service.replace_user_permissions(user_id, payload.permissions, caller)
     except rbac_service.RbacError as exc:

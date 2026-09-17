@@ -75,7 +75,7 @@ async def _shipments(can) -> list[dict]:
         for t in await Transfer.filter(direction="inbound", ack_status="awaiting", status__in=["approved", "requested"]).prefetch_related("lines"):
             out.append(_task(
                 f"transfer:{t.id}:ack", "Shipments", f"{t.from_warehouse} wants to send {t.number or 'a shipment'}",
-                f"{_items(len(t.lines))}. Say whether it can be sent — agree, or decline with a reason.",
+                f"{_items(len(t.lines))}. Say whether it can be sent: agree, or decline with a reason.",
                 "/inventory/transfers", t.ack_requested_at or t.requested_at, ACK_OVERDUE,
             ))
         # Old demo records (origin "local") never came from anyone, so nobody is reminded about them.
@@ -102,7 +102,7 @@ async def _shipments(can) -> list[dict]:
         for t in await Transfer.filter(direction="outbound", status="approved", ack_status__in=list(READY_TO_SEND)).prefetch_related("lines"):
             out.append(_task(
                 f"transfer:{t.id}:dispatch", "Shipments", f"Dispatch {t.number} to {t.from_warehouse}",
-                f"{t.from_warehouse} agreed. {_items(len(t.lines))} — load it and mark it dispatched.",
+                f"{t.from_warehouse} agreed. {_items(len(t.lines))}. Load it and mark it dispatched.",
                 "/inventory/transfers", t.ack_at or t.requested_at, DISPATCH_OVERDUE,
             ))
         for t in await Transfer.filter(direction="outbound", ack_status="declined", status__in=["requested", "approved"]):
@@ -163,9 +163,9 @@ async def _accounts(user: User, can) -> list[dict]:
         if drafts:
             out.append(_task(
                 "vouchers:post", "Accounts", f"{len(drafts)} voucher{'' if len(drafts) == 1 else 's'} waiting to be posted",
-                "Saved as drafts — they aren't in the books until someone posts them.", "/accounts/vouchers?status=draft", drafts[0].created_at, APPROVAL_OVERDUE,
+                "Saved as drafts. They aren't in the books until someone posts them.", "/accounts/vouchers?status=draft", drafts[0].created_at, APPROVAL_OVERDUE,
             ))
-    if can("accounts.vouchers", "W"):
+    if can("accounts.cheques", "W"):
         due = await Cheque.filter(status="pending", cheque_date__lte=shop_day()).order_by("cheque_date")
         if due:
             since = datetime.combine(due[0].cheque_date, datetime.min.time(), tzinfo=timezone.utc) if isinstance(due[0].cheque_date, _date) else None

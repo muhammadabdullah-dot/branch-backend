@@ -56,7 +56,7 @@ def normalize_phone(raw: str | None, what: str = "the customer's mobile number")
     if len(digits) == 10 and digits.startswith("3"):
         digits = "0" + digits
     if not 10 <= len(digits) <= 13:
-        raise MemberError(f"Enter {what} — 11 digits, like 0300 1234567.")
+        raise MemberError(f"Enter {what} as 11 digits, like 0300 1234567.")
     return digits
 
 
@@ -283,7 +283,7 @@ def redeem_points(amount: Decimal, s: LoyaltySettings) -> int:
     """The points behind a rupee amount of points on a bill. The amount has to be a whole number of points."""
     points = amount / s.point_value
     if points != points.to_integral_value():
-        raise MemberError(f"Points come off a bill in steps of Rs {s.point_value.normalize():f} — adjust the points amount.")
+        raise MemberError(f"Points come off a bill in steps of Rs {s.point_value.normalize():f}, so adjust the points amount.")
     return int(points)
 
 

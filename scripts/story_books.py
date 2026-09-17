@@ -1179,7 +1179,7 @@ class Story:
         await row.save()
         await vouchers_service.emit_settings(row)
         notice = await alerts_service.notify("accounts.period", "Closed the books up to 31 Aug 2026", body=f"By {self.bm.name}", link="/accounts/settings",
-                                             audience_any=[("accounts.period", "X"), ("accounts.books", "R")], tone="warning")
+                                             audience_any=[("accounts.period", "X"), ("accounts.settings", "R")], tone="warning")
         await Notice.filter(id=notice.id).update(at=at(date(2026, 9, 4), 17, 10))
 
 

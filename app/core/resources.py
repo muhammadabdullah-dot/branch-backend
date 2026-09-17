@@ -3,6 +3,35 @@
 Not user-editable data. Adding a new screen/action means adding a line here, not a migration.
 """
 
+ACCOUNTS_RESOURCES: list[str] = [
+    "accounts.desk",
+    "accounts.trial-balance",
+    "accounts.income-statement",
+    "accounts.balance-sheet",
+    "accounts.month-by-month",
+    "accounts.day-book",
+    "accounts.ledger",
+    "accounts.vouchers",
+    "accounts.vouchers.post",
+    "accounts.vouchers.reverse",
+    "accounts.opening-balances",
+    "accounts.chart",
+    "accounts.receivables",
+    "accounts.payables",
+    "accounts.cheques",
+    "accounts.fixed-assets",
+    "accounts.tax",
+    "accounts.settings",
+    "accounts.period",
+]
+
+# Every account belongs to exactly one area (services/accounts_areas.py decides which).
+AREA_KEYS: list[str] = [
+    "cash-bank", "receivables", "stock", "advances", "tax", "fixed-assets", "inter-office",
+    "payables", "customer-balances", "other-liabilities", "equity", "income", "cost-of-sales", "expenses",
+]
+AREA_RESOURCES: list[str] = [f"accounts.area.{key}" for key in AREA_KEYS]
+
 RESOURCES: list[str] = [
     "store.billing",
     "store.discount-override",
@@ -13,6 +42,8 @@ RESOURCES: list[str] = [
     "store.gift-vouchers",
     "store.counters",
     "store.staff-on-duty",
+    # Printing a bill made earlier again, marked REPRINT with who and when (recorded in the activity log).
+    "store.reprint",
     "inventory.overview",
     "inventory.catalog",
     "inventory.suppliers",
@@ -33,6 +64,8 @@ RESOURCES: list[str] = [
     # Sending stock to another branch; without .approve the send waits for someone who has it.
     "inventory.transfers.send",
     "inventory.transfers.approve",
+    # Asking head office for stock: drafting, sending and withdrawing a request. The shipment it becomes is received as usual.
+    "inventory.requests",
     "inventory.locations",
     "branch-console.dashboard",
     "branch-console.approvals",
@@ -43,24 +76,30 @@ RESOURCES: list[str] = [
     "branch-console.members",
     # How points are earned and what they're worth. Head office can set the same rules.
     "branch-console.loyalty",
+    # The branch's lists and settings: Item lists (departments, brands, units, GST rates, customer groups), reasons,
+    # payment methods, and what bills print with the gift voucher rules.
+    "branch-console.item-lists",
+    "branch-console.reasons",
+    "branch-console.payment-methods",
+    "branch-console.shop-settings",
     # Seeing how this branch is connected to head office, and pushing now rather than waiting for
     # the next scheduled tick. Under `branch-console` so the Branch Manager picks it up from the
     # existing prefix — the person who gets asked "is our data reaching head office?" is the
     # person standing in the branch, and they should be able to answer without ringing anyone.
     "branch-console.sync",
     "reports",
+    # ABC / XYZ analysis of Items, and dashboard figures opened down to the bill.
+    "reports.analysis",
+    "reports.kpis",
     # Backing the database up (Backup Now, the daily backup, downloads) and putting a backup back. Restore is a
     # Branch Manager's alone — see core/abilities.py.
     "branch-console.backup",
     "branch-console.backup.restore",
-    # The books. Seeing them; making vouchers and recording cheques; posting and reversing; the chart of accounts;
-    # taking payments from credit customers; closing months.
-    "accounts.books",
-    "accounts.vouchers",
-    "accounts.vouchers.post",
-    "accounts.chart",
-    "accounts.receivables",
-    "accounts.period",
+    # The books, a screen or action each. Whole-book reports always show the whole book; the ledger, the chart and
+    # vouchers only show accounts in the areas below. See core/abilities.py and services/accounts_areas.py.
+    *ACCOUNTS_RESOURCES,
+    # Which accounts a person sees (R) and can put on a voucher line (W), one resource per area.
+    *AREA_RESOURCES,
 ]
 
 # Resource that gates the delegated permission-management endpoints themselves (contracts.md §2.6).

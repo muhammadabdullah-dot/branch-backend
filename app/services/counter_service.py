@@ -278,7 +278,7 @@ async def staff_on_duty() -> dict:
         row["cashIn" if movement.kind == "in" else "cashOut"] += movement.amount
         if not row["name"]:
             user = await User.get_or_none(id=movement.user_id)
-            row["name"] = user.name if user else "—"
+            row["name"] = user.name if user else "-"
 
     rows = sorted(people.values(), key=lambda r: (not r["onDuty"], -r["netSales"], r["name"]))
     return {

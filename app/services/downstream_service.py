@@ -1,9 +1,9 @@
 """Collecting what head office sends this branch.
 
 Head office keeps a numbered queue per branch: staff accounts it created or changed, role access it set,
-transfers on their way here or updates on ones this branch sent. This module asks for everything after
-the last number it applied, applies each message, moves its cursor on, and tells head office how each
-one went.
+transfers on their way here or updates on ones this branch sent, and the company's suppliers. This module
+asks for everything after the last number it applied, applies each message, moves its cursor on, and tells
+head office how each one went.
 
 Every message carries the whole thing as it now stands, so applying one twice changes nothing — a pull
 that dies halfway is simply repeated. A message this branch can't apply (an unknown role, an email
@@ -87,6 +87,14 @@ async def apply(kind: str, payload: dict) -> str:
         return await members_service.apply_entry(payload.get("entry") or {})
     if kind == "loyalty.settings":
         return await members_service.apply_settings(payload.get("settings") or {})
+    if kind == "supplier.upsert":
+        from app.services import supplier_sync_service
+
+        return await supplier_sync_service.apply_upsert(payload)
+    if kind == "supplier.list":
+        from app.services import supplier_sync_service
+
+        return await supplier_sync_service.apply_list(payload)
     # A newer head office can send kinds this branch software doesn't know yet; say so rather than fail.
     return "unknown-kind"
 
@@ -123,6 +131,12 @@ async def pull_once(*, triggered_by: str = "scheduler") -> PullResult:
                 if not _manifest_sent:
                     response = await client.post(f"{identity.cloud_url}/sync/manifest", json=await _manifest(), headers=_headers(identity))
                     _manifest_sent = response.status_code < 400
+                    if _manifest_sent:
+                        # The same list in the branch's own words, so head office's Branch Staff screen reads like the
+                        # branch's access screen. A head office too old to take it just says no; that's not a failure.
+                        from app.services.rbac_service import abilities_catalog
+
+                        await client.post(f"{identity.cloud_url}/rbac/branch-abilities", json=abilities_catalog(), headers=_headers(identity))
                 await _send_acks(client, identity, state)
 
                 for _ in range(MAX_PAGES_PER_RUN):

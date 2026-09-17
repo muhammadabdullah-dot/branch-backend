@@ -29,6 +29,7 @@ _FIELD_MAP = {
     "packSize": "pack_size", "avgCost": "avg_cost", "itemClass": "item_class",
     "discPercent": "disc_percent", "discFlat": "disc_flat", "lockDisc": "lock_disc",
     "parentId": "parent_id", "parentQty": "parent_qty",
+    "wholesalePrice": "wholesale_price", "reorderLevel": "reorder_level",
 }
 _TEXT_FIELDS = {
     "name", "unit", "barcode", "packUnit", "department", "category", "itemClass", "subclass",
@@ -168,6 +169,7 @@ async def create(data: ProductCreate, user: User | None = None) -> Product:
     sku = (data.sku or "").strip() or await _next_sku()
     await _refuse_taken(sku, "Code")
     fields = _to_model_fields(data.model_dump())
+    await _refuse_switched_off(fields)
     if fields.get("barcode"):
         if fields["barcode"] == sku:
             fields["barcode"] = None
@@ -193,6 +195,7 @@ async def update(product_id: str, data: ProductUpdate, user: User | None = None)
         raise CatalogError("Item not found", status=404)
     old_price, old_rpp = product.price, product.rpp
     changes = _to_model_fields(data.model_dump(exclude_unset=True))
+    await _refuse_switched_off(changes, product)
 
     if changes.get("barcode"):
         if changes["barcode"] == product.sku:
@@ -292,19 +295,28 @@ async def remove_picture(product_id: str) -> Product:
 
 
 async def facets() -> dict[str, list[str]]:
-    async def distinct(column: str) -> list[str]:
-        values = (
-            await Product.filter(**{f"{column}__isnull": False})
-            .distinct().order_by(column).limit(2000).values_list(column, flat=True)
-        )
-        return [v for v in values if v and v.strip()]
+    """What the Item form offers: the switched-on values of each Item list (Branch Console > Lists and Settings), which
+    also holds every value already on an Item. Variants aren't a list; they describe one Item."""
+    from app.services import masters_service
 
+    lists = await masters_service.choices()
+    variants = await Product.filter(variant__isnull=False).distinct().order_by("variant").limit(2000).values_list("variant", flat=True)
     return {
-        "departments": await distinct("department"), "categories": await distinct("category"),
-        "classes": await distinct("item_class"), "subclasses": await distinct("subclass"),
-        "manufacturers": await distinct("manufacturer"), "brands": await distinct("brand"),
-        "units": await distinct("unit"), "packUnits": await distinct("pack_unit"), "variants": await distinct("variant"),
+        "departments": lists["department"], "categories": lists["category"], "classes": lists["class"],
+        "subclasses": lists["subclass"], "manufacturers": lists["manufacturer"], "brands": lists["brand"],
+        "units": lists["unit"], "packUnits": lists["pack-unit"], "gstRates": lists["gst-rate"],
+        "variants": [v for v in variants if v and v.strip()],
     }
+
+
+async def _refuse_switched_off(fields: dict, product: Product | None = None) -> None:
+    from app.services import masters_service
+
+    before = {column: getattr(product, column) for column in masters_service.ITEM_FIELD_KINDS} if product else None
+    try:
+        await masters_service.refuse_switched_off_values("products", fields, before)
+    except masters_service.MastersError as exc:
+        raise CatalogError(exc.message) from exc
 
 
 async def price_changes(from_at: datetime | None, to_at: datetime | None, limit: int = 500) -> list[ProductPriceChange]:
@@ -332,6 +344,8 @@ def _row_to_product_create(row: dict) -> ProductCreate:
     status = cell_str_any(row, "STATUS")  # only present by name in one of the two real files
 
     tax_raw = cell_str_any(row, "taxRate", "TAX RATE")
+    wholesale_raw = cell_str_any(row, "wholesalePrice", "WHOLESALE RATE")
+    reorder_raw = cell_str_any(row, "reorderLevel", "MIN STOCK", "MINIMUM STOCK")
     # Only the cells the file actually has go into the model, so an update can tell "this column
     # wasn't in the file" (leave the Item alone) from "set this".
     present = {
@@ -344,6 +358,8 @@ def _row_to_product_create(row: dict) -> ProductCreate:
         "packSize": (int(float(pack_size_raw)) or None) if pack_size_raw else None,
         "avgCost": Decimal(avg_cost_raw) if avg_cost_raw else None,
         "rpp": Decimal(rpp_raw) if rpp_raw else None,
+        "wholesalePrice": Decimal(wholesale_raw) if wholesale_raw else None,
+        "reorderLevel": Decimal(reorder_raw) if reorder_raw else None,
         "department": cell_str_any(row, "department", "DEPARTMENT"),
         "category": cell_str_any(row, "category", "CATEGORY"),
         "itemClass": cell_str_any(row, "itemClass", "CLASS"),
@@ -420,7 +436,7 @@ async def import_product_aliases(filename: str, content: bytes) -> ImportSummary
                 raise ValueError(f"Alias code {code} already exists")
             product_id = name_to_id.get(name.strip().upper())
             if not product_id:
-                raise ValueError(f"No product named {name!r} — import products before aliases")
+                raise ValueError(f"No product named {name!r}, so import products before aliases")
             seen_in_file.add(code)
             to_create.append(
                 ProductAlias(product_id=product_id, code=code, remarks=cell_str_any(row, "Remarks", "remarks"))

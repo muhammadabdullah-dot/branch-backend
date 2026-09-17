@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, status
+from pydantic import BaseModel
 
 from app.controllers import rbac_controller
 from app.middlewares.auth import get_current_user, require_branch_manager
@@ -6,6 +7,7 @@ from app.models import User
 from app.schemas.auth import PermissionOut
 from app.schemas.rbac import (
     AbilitiesOut,
+    AbilityGroupOut,
     RoleOut,
     UpdatePermissionsRequest,
     UserCreateRequest,
@@ -22,15 +24,40 @@ _read = require_branch_manager
 _write = require_branch_manager
 
 
+class GridColumnOut(BaseModel):
+    action: str
+    label: str
+
+
+class GridRowOut(BaseModel):
+    resource: str
+    label: str
+    hint: str = ""
+
+
+class GridOut(BaseModel):
+    columns: list[GridColumnOut]
+    rows: list[GridRowOut]
+
+
+class GroupWithGridOut(AbilityGroupOut):
+    # A group that reads best as rows and columns (the account areas: See and Use).
+    grid: GridOut | None = None
+
+
+class CatalogOut(AbilitiesOut):
+    groups: list[GroupWithGridOut]
+
+
 @router.get("/resources", response_model=list[str])
 async def resources(user: User = Depends(_read)) -> list[str]:
     return rbac_controller.resources()
 
 
-@router.get("/abilities", response_model=AbilitiesOut)
-async def abilities(user: User = Depends(_read)) -> AbilitiesOut:
+@router.get("/abilities", response_model=CatalogOut)
+async def abilities(user: User = Depends(_read)) -> CatalogOut:
     """Everything a person at the branch can be given, grouped and in plain words, with the two starting points."""
-    return AbilitiesOut(**rbac_controller.abilities())
+    return CatalogOut(**rbac_controller.abilities())
 
 
 @router.get("/roles", response_model=list[RoleOut])

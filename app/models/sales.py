@@ -43,6 +43,8 @@ class SaleRecord(models.Model):
 
     class Meta:
         table = "sale_records"
+        # Every report and figure asks for the bills of a period first; without this each one reads every bill ever rung.
+        indexes = (("at",),)
 
 
 class SaleLine(models.Model):
@@ -68,6 +70,8 @@ class SaleLine(models.Model):
 
     class Meta:
         table = "sale_lines"
+        # A bill's lines, and one Item's sales over a period (ABC and XYZ, the Item drill-down).
+        indexes = (("sale",), ("product",))
 
 
 class SaleTender(models.Model):
@@ -89,6 +93,7 @@ class SaleTender(models.Model):
 
     class Meta:
         table = "sale_tenders"
+        indexes = (("sale",),)
 
 
 class ReturnRecord(models.Model):
@@ -108,6 +113,9 @@ class ReturnRecord(models.Model):
     # paid (refund_reference is its code) and never touches the drawer or cash figures.
     refund_method = fields.CharField(max_length=20, default="CASH")
     refund_reference = fields.CharField(max_length=40, null=True)
+    # Why the goods came back, from the branch's list of customer return reasons (a ListEntry code). Null on
+    # returns taken before reasons were recorded, and when none was picked.
+    reason = fields.CharField(max_length=40, null=True)
     note = fields.TextField(null=True)
     # The GST inside refund_total, and the rupee rounding the refund took. Null on older returns.
     tax_total = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
@@ -115,6 +123,8 @@ class ReturnRecord(models.Model):
 
     class Meta:
         table = "return_records"
+        # Returns in a period, and the returns taken against one bill.
+        indexes = (("at",), ("against",))
 
 
 class ReturnLine(models.Model):
@@ -134,3 +144,4 @@ class ReturnLine(models.Model):
 
     class Meta:
         table = "return_lines"
+        indexes = (("return_record",), ("product",))

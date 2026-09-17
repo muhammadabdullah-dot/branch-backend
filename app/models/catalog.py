@@ -49,6 +49,12 @@ class Product(models.Model):
     )
     parent_qty = fields.DecimalField(max_digits=12, decimal_places=3, null=True)
 
+    # Added 2026-09-17. The Item's own wholesale price. Blank: wholesale bills take the branch's wholesale discount
+    # off the sale price (Lists and Settings > Receipt and Vouchers).
+    wholesale_price = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    # Low stock at this branch means fewer than this left. Blank: the branch's usual low stock level.
+    reorder_level = fields.DecimalField(max_digits=12, decimal_places=3, null=True)
+
     class Meta:
         table = "products"
 
@@ -119,6 +125,11 @@ class PaymentMethod(models.Model):
     code = fields.CharField(max_length=20, pk=True)
     name = fields.CharField(max_length=60)
     kind = fields.CharField(max_length=20)
+    # A branch without a card machine, or not taking JazzCash, switches that method off: Billing, Returns and
+    # Gift Vouchers stop offering it and the server refuses it. Cash can't be switched off.
+    active = fields.BooleanField(default=True)
+    # The order the methods are listed in on the Payment Methods screen.
+    sort_order = fields.IntField(default=0)
 
     class Meta:
         table = "payment_methods"

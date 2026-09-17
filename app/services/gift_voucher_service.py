@@ -43,9 +43,23 @@ async def issue(face_value: Decimal, party_id: str | None, paid_by: str | None =
     """
     if face_value <= 0:
         raise VoucherError("A voucher has to be worth something.")
+    from app.schemas.types import money_str
+    from app.services import masters_service
+
+    # The branch's gift voucher rules (Branch Console > Lists and Settings > Receipt and Vouchers).
+    rules = await masters_service.voucher_rules()
+    if face_value < rules["minValue"]:
+        raise VoucherError(f"A gift voucher is at least Rs {money_str(rules['minValue'])} at this branch.")
+    if rules["maxValue"] is not None and face_value > rules["maxValue"]:
+        raise VoucherError(f"A gift voucher is at most Rs {money_str(rules['maxValue'])} at this branch.")
     paid_by = (paid_by or "").strip().upper() or None
     if paid_by is not None and paid_by not in PAID_BY:
         raise VoucherError("Pick how the voucher was paid for: cash, card, bank, Easypaisa, JazzCash, or complimentary.")
+    if paid_by and paid_by != "COMPLIMENTARY":
+        try:
+            await masters_service.refuse_switched_off_methods([paid_by])
+        except masters_service.MastersError as exc:
+            raise VoucherError(exc.message) from exc
     party = None
     if party_id:
         party = await Party.get_or_none(id=party_id, active=True)
@@ -71,7 +85,7 @@ async def issue(face_value: Decimal, party_id: str | None, paid_by: str | None =
         # The drawer of whoever takes the money — with several tills open there is no single "the till".
         till = await session_for(user)
         if not till:
-            raise VoucherError("Cash for a voucher goes into your till — open your till first.")
+            raise VoucherError("Cash for a voucher goes into your till, so open your till first.")
         await CashMovement.create(
             till_session=till, kind="in", amount=face_value, denominations={}, user=user,
             account=await Resolver().key("liab.gift_vouchers"), payee=party.name if party else None,
@@ -83,7 +97,7 @@ async def issue(face_value: Decimal, party_id: str | None, paid_by: str | None =
         balance=face_value,
         party=party,
         issued_to_name=party.name if party else None,
-        expires_at=datetime.now(timezone.utc) + timedelta(days=180),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=rules["validityDays"]),
         paid_by=paid_by, payment_reference=reference, issued_by_name=getattr(user, "name", None),
     )
 
@@ -113,11 +127,11 @@ async def _party_by_name(name: str) -> tuple[Party | None, str | None]:
         return matches[0], None
     if not matches:
         return None, (
-            f"it was issued by name to \"{name}\", and no customer with that name is registered — "
+            f"it was issued by name to \"{name}\", and no customer with that name is registered, "
             "so there is no way to check who is holding it. Register the customer, then try again."
         )
     return None, (
-        f"it was issued by name to \"{name}\", and more than one customer has that name — "
+        f"it was issued by name to \"{name}\", and more than one customer has that name, "
         "so it can't be told whose it is."
     )
 
@@ -196,7 +210,7 @@ async def redeem(code: str, amount: Decimal, invoice_number: str, party_id: str 
         raise VoucherError(reason)
     if voucher.balance < amount:
         raise VoucherError(
-            f"Voucher {voucher.code} only has Rs {voucher.balance:,.0f} left — less than the Rs {amount:,.0f} being taken."
+            f"Voucher {voucher.code} only has Rs {voucher.balance:,.0f} left, which is less than the Rs {amount:,.0f} being taken."
         )
     voucher.balance -= amount
     if voucher.balance <= 0:

@@ -11,7 +11,7 @@ def _to_out(location: Location, held: dict[str, tuple[int, Decimal]]) -> Locatio
     items, units = held.get(location.id, (0, Decimal("0")))
     return LocationOut(
         id=location.id, name=location.name, kind=location.kind, priority=location.priority,
-        active=location.active, itemsHeld=items, unitsHeld=units,
+        active=location.active, itemsHeld=items, unitsHeld=units, sellsFrom=location.id == location_service.SALES_LOCATION_ID,
     )
 
 

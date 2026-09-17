@@ -165,7 +165,7 @@ async def detail(product_ids: list[str] | None = None) -> dict[str, dict]:
             item = items[m["pid"]] = _Item()
         qty = _d(m["qty"])
         kind, reason = m["kind"], m["reason"]
-        name = m["location"] or "—"
+        name = m["location"] or "-"
         item.locations[name] = item.locations.get(name, D0) + qty
         item.last_moved = m["at"]
 

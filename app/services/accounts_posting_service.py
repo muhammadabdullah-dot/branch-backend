@@ -13,6 +13,7 @@ One voucher per source, regenerated whenever the source changes, never touched o
   transfer-out / transfer-out-received / transfer-out-settled / transfer-in:<id>   TRV   stock in transit, at cost
   gift-voucher:<id> / gift-voucher-expiry:<id>   GVV  vouchers sold other than for cash, given free, or expired
   cheque-received / cheque-cleared / cheque-bounced:<id>   JV / BRV
+  cheque-issued / cheque-issued-cleared:<id>   BPV / JV   a cheque written to a supplier, then paid by the bank
 
 Days are the shop's days (Pakistan time). Nothing before the books' start day is posted — that's what opening
 balances are for.
@@ -88,7 +89,7 @@ class Run:
             return
         self.counts[outcome] += 1
         if outcome == "locked":
-            self.problems.append(f"{source} changed after its month was closed — the closed books keep the old figures.")
+            self.problems.append(f"{source} changed after its month was closed. The closed books keep the old figures.")
 
     async def drop(self, source: str) -> None:
         async with in_transaction():
@@ -291,7 +292,8 @@ async def _cash_movements(run: Run) -> None:
 async def _customer_payments(run: Run) -> None:
     lo, hi = bounds(run.start, run.end)
     acc = run.accounts
-    for payment in await CustomerPayment.filter(at__gte=lo, at__lt=hi, method__not="CASH").prefetch_related("party"):
+    # A voided payment's voucher was taken out when it was voided; a full run drops any left behind (not seen).
+    for payment in await CustomerPayment.filter(at__gte=lo, at__lt=hi, method__not="CASH", voided_at__isnull=True).prefetch_related("party"):
         money_acc = await acc.tender(payment.method, run.settings.tender_accounts or {}, payment.reference)
         await run.put(f"customer-payment:{payment.id}", "BRV", shop_day(payment.at),
                       [(money_acc, Decimal(payment.amount), ZERO, "__header__"), (await acc.customer(payment.party), ZERO, Decimal(payment.amount), payment.reference)],
@@ -433,14 +435,35 @@ async def _gift_vouchers(run: Run) -> None:
 
 
 async def _cheques(run: Run) -> None:
+    from app.services.accounts_money_service import CHEQUE_SOURCES, ensure_cheques_issued_account
+
     acc = run.accounts
     in_hand = await acc.key("cash.cheques")
     for cheque in await Cheque.filter(received_on__gte=run.settings.books_start).prefetch_related("party_account", "bank_account"):
         amount = Decimal(cheque.amount)
         source = f"cheque-received:{cheque.id}"
         if cheque.status == "cancelled":
-            for prefix in ("cheque-received", "cheque-cleared", "cheque-bounced"):
+            for prefix in CHEQUE_SOURCES:
                 await run.drop(f"{prefix}:{cheque.id}")
+            continue
+        # A step that was undone (a clearing, a bounce) leaves no voucher behind.
+        if not (cheque.cleared_on and cheque.bank_account):
+            await run.drop(f"cheque-cleared:{cheque.id}")
+            await run.drop(f"cheque-issued-cleared:{cheque.id}")
+        if not cheque.bounced_on:
+            await run.drop(f"cheque-bounced:{cheque.id}")
+        if cheque.direction == "issued":
+            # Written to a supplier: they are paid the day it is written; the bank pays it when it clears.
+            issued = await ensure_cheques_issued_account()
+            await run.put(f"cheque-issued:{cheque.id}", "BPV", cheque.received_on,
+                          [(cheque.party_account, amount, ZERO, f"Cheque {cheque.cheque_no}"), (issued, ZERO, amount, "__header__")],
+                          f"{cheque.number}: cheque {cheque.cheque_no} written to {cheque.party_account.name}"
+                          + (f" on {cheque.bank_account.name}" if cheque.bank_account else "") + (f", dated {cheque.cheque_date:%d %b %Y}" if cheque.cheque_date else ""),
+                          cheque.cheque_no, issued)
+            if cheque.cleared_on and cheque.bank_account:
+                await run.put(f"cheque-issued-cleared:{cheque.id}", "JV", cheque.cleared_on,
+                              [(issued, amount, ZERO, f"Cheque {cheque.cheque_no} cleared"), (cheque.bank_account, ZERO, amount, f"Cheque {cheque.cheque_no} cleared")],
+                              f"{cheque.number}: cheque {cheque.cheque_no} to {cheque.party_account.name} paid by {cheque.bank_account.name}", cheque.cheque_no)
             continue
         await run.put(source, "JV", cheque.received_on,
                       [(in_hand, amount, ZERO, f"Cheque {cheque.cheque_no}"), (cheque.party_account, ZERO, amount, f"Cheque {cheque.cheque_no}")],
@@ -565,4 +588,4 @@ async def opening_suggestion() -> dict:
         lines.append({"accountId": str(outstanding.id), "accountCode": outstanding.code, "accountName": outstanding.name,
                       "debit": "0.00", "credit": format(held, "f"), "description": "Gift vouchers sold before the books' start, not yet spent"})
     return {"booksStart": start.isoformat(), "date": (start - timedelta(days=1)).isoformat(), "lines": lines,
-            "note": "Cash in the safe, bank balances, supplier dues, fixed assets and capital aren't in the branch's records — add them."}
+            "note": "Cash in the safe, bank balances, supplier dues, fixed assets and capital aren't in the branch's records, so add them."}

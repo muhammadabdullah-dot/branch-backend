@@ -60,7 +60,7 @@ async def verify(cloud_url: str, code: str, pairing_key: str, claimed_from: str 
     existing = await current()
     if existing is not None:
         raise RegistrationError(
-            f"This branch server is already set up as {existing.code} — {existing.name}. "
+            f"This branch server is already set up as {existing.code} ({existing.name}). "
             "Branch details can't be changed here; main office must revoke its pairing first.",
             status=409,
         )
@@ -104,7 +104,7 @@ async def verify(cloud_url: str, code: str, pairing_key: str, claimed_from: str 
     if not secret:
         raise RegistrationError(
             "Head office accepted the key but didn't return sync credentials. Nothing has been "
-            "saved — tell main office and try again.",
+            "saved. Tell main office and try again.",
             status=502,
         )
 

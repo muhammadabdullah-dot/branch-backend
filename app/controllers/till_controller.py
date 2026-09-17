@@ -14,6 +14,7 @@ from app.schemas.till import (
     TillSessionListOut,
     TillSessionSummaryOut,
 )
+from app.schemas.till_report import TillReportOut, TillReportSessionOut
 from app.services import till_service
 
 
@@ -98,3 +99,23 @@ async def list_sessions(from_at: datetime | None, to_at: datetime | None, limit:
         for s in sessions
     ]
     return TillSessionListOut(items=items, total=total)
+
+
+async def report_sessions(from_at: datetime | None, to_at: datetime | None) -> list[TillReportSessionOut]:
+    sessions = await till_service.list_report_sessions(from_at, to_at)
+    return [
+        TillReportSessionOut(
+            id=str(s.id), sessionNumber=s.session_number, status=s.status, counterName=s.counter.name if s.counter_id and s.counter else None,
+            openedBy=s.opened_by.name if s.opened_by else None, closedBy=s.closed_by.name if s.closed_by_id and s.closed_by else None,
+            openedAt=s.opened_at, closedAt=s.closed_at, openingFloat=s.opening_float, netCash=s.net_cash,
+            countedCash=s.counted_cash, variance=s.variance,
+        )
+        for s in sessions
+    ]
+
+
+async def session_report(session_id: str) -> TillReportOut:
+    try:
+        return TillReportOut(**await till_service.session_report(session_id))
+    except till_service.TillError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, exc.message)

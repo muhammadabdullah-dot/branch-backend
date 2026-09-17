@@ -12,7 +12,7 @@ import uuid
 
 from tortoise.transactions import atomic
 
-from app.core.abilities import BRANCH_MANAGER, LEGACY_JOBS, SALESPERSON, legacy_grants
+from app.core.abilities import BRANCH_MANAGER, LEGACY_JOBS, SALESPERSON, is_legacy, legacy_grants, translate_legacy, translate_legacy_resources
 from app.core.device_context import get_device_id
 from app.core.resources import excluded_resources_for_role
 from app.models import OutboxEvent, Role, RoleDefaultPermission, User, UserPermission
@@ -120,6 +120,12 @@ async def apply_upsert(data: dict) -> str:
     grants = data.get("permissions") or []
     if legacy and not grants:
         grants = [{"resource": r, "actions": sorted(a)} for r, a in legacy_grants(data.get("roleId") or "").items()]
+    if is_legacy(g.get("resource") for g in grants):
+        # Written before the books were split into a tick per screen and area: read as what it now stands for.
+        held: dict[str, set[str]] = {}
+        for grant in grants:
+            held.setdefault(grant.get("resource") or "", set()).update(grant.get("actions") or [])
+        grants = [{"resource": r, "actions": sorted(a)} for r, a in translate_legacy(held).items()]
     for grant in grants:
         resource = grant.get("resource")
         actions = set(grant.get("actions") or [])
@@ -147,13 +153,16 @@ async def apply_role_template(data: dict) -> str:
     role = await Role.get_or_none(id=data.get("roleId"))
     if not role and data.get("roleId") in LEGACY_JOBS:
         raise StaffApplyError(
-            f"Branches have no {LEGACY_JOBS[data['roleId']]['title']} role any more — what each person can do is set on the person."
+            f"Branches have no {LEGACY_JOBS[data['roleId']]['title']} role any more. What each person can do is set on the person."
         )
     if not role:
         raise StaffApplyError(f"This branch has no role called {data.get('roleId')}.")
     excluded = excluded_resources_for_role(role.id)
+    resources = set(data.get("resources") or [])
+    if is_legacy(resources):
+        resources = translate_legacy_resources(resources)
     await RoleDefaultPermission.filter(role=role).delete()
-    for resource in sorted(set(data.get("resources") or []) - excluded):
+    for resource in sorted(resources - excluded):
         await RoleDefaultPermission.create(role=role, resource=resource, can_read=True, can_write=True, can_execute=True)
     role.managed_by_head_office = True
     await role.save(update_fields=["managed_by_head_office"])

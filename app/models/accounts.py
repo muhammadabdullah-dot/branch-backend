@@ -186,20 +186,26 @@ class CustomerPayment(models.Model):
     )
     balance_after = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
     at = fields.DatetimeField(auto_now_add=True)
+    # Taken back: the customer owes it again, the voucher is gone and a cash one is out of the drawer. Kept on the record.
+    voided_at = fields.DatetimeField(null=True)
+    voided_by_name = fields.CharField(max_length=120, null=True)
+    void_reason = fields.CharField(max_length=255, null=True)
 
     class Meta:
         table = "customer_payments"
 
 
 class Cheque(models.Model):
-    """A cheque received from a customer (or anyone paying the branch) — held, deposited, cleared or bounced."""
+    """A cheque received from a customer (or anyone paying the branch) — held, deposited, cleared or bounced — or one
+    the branch writes to a supplier, which stays owed to the bank until it clears."""
 
     id = fields.UUIDField(pk=True)
     number = fields.CharField(max_length=20, unique=True)
+    # received · issued
     direction = fields.CharField(max_length=10, default="received")
-    # The customer or other account the cheque came from.
+    # The customer or other account the cheque came from (received), or the supplier it was written to (issued).
     party_account: fields.ForeignKeyRelation[Account] = fields.ForeignKeyField("models.Account", related_name="cheques")
-    # The branch's bank account it was deposited into.
+    # The branch's bank account it was deposited into (received), or the one it is drawn on (issued).
     bank_account: fields.ForeignKeyNullableRelation[Account] = fields.ForeignKeyField(
         "models.Account", related_name="cheques_deposited", null=True, on_delete=fields.SET_NULL
     )
@@ -213,6 +219,8 @@ class Cheque(models.Model):
     cleared_on = fields.DateField(null=True)
     bounced_on = fields.DateField(null=True)
     note = fields.CharField(max_length=255, null=True)
+    # A bounced cheque deposited again is a new cheque record; this is the id of the one that bounced.
+    redeposit_of_id = fields.CharField(max_length=36, null=True)
     created_by_name = fields.CharField(max_length=120, null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)

@@ -7,6 +7,7 @@ from app.schemas.sales import (
     DiscountApprovalOut,
     DiscountApprovalRequest,
     NextInvoiceNumberOut,
+    ReceiptReprintOut,
     SaleCreateRequest,
     SaleLineOut,
     SaleListOut,
@@ -105,3 +106,33 @@ async def list_sales(from_at: datetime | None, to_at: datetime | None, limit: in
     offset = max(offset, 0)
     sales, total = await sales_service.list_sales(from_at, to_at, limit, offset)
     return SaleListOut(items=[await _sale_out(s) for s in sales], total=total)
+
+
+REPRINT_ROUTE = "/sales/{invoice_number}/reprint"
+
+
+async def reprint(invoice_number: str, user: User) -> ReceiptReprintOut:
+    """A bill made earlier, to print again. The POST that prints it is recorded in the activity log like every other
+    action (middlewares/activity.py), so the copy number counts the reprints recorded before this one."""
+    from datetime import timezone
+
+    from app.models import ActivityLog, TillSession
+
+    sale = await sales_service.find_by_invoice(invoice_number)
+    if not sale:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"There is no bill {invoice_number.strip().upper()} at this branch.")
+    earlier = await ActivityLog.filter(
+        route=REPRINT_ROUTE, method="POST", status_code__lt=400, path__iexact=f"/sales/{sale.invoice_number}/reprint",
+    ).count()
+    till_label = None
+    if sale.till_session_id:
+        session = await TillSession.get_or_none(id=sale.till_session_id).prefetch_related("counter")
+        if session:
+            till_label = f"{session.counter.name if session.counter else 'Till'} · {session.session_number}"
+    out = await _sale_out(sale)
+    # The member's points today aren't what they were on the bill's day, so a reprint leaves the balance off.
+    out.memberPoints = None
+    return ReceiptReprintOut(
+        sale=out, cashierName=sale.cashier.name if sale.cashier else None, tillLabel=till_label,
+        reprintedAt=datetime.now(timezone.utc), reprintedBy=user.name, copyNumber=earlier + 1,
+    )

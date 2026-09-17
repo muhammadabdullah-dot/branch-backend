@@ -82,7 +82,18 @@ async def create(data: PartyCreate) -> Party:
     seq = await next_value("party_code", 3)
     code = f"CUST{seq:03d}"
     fields = _to_model_fields(data.model_dump())
+    await _refuse_switched_off_group(fields)
     return await Party.create(code=code, is_walk_in=False, credit_balance=Decimal("0"), active=True, **fields)
+
+
+async def _refuse_switched_off_group(fields: dict, party: Party | None = None) -> None:
+    """A customer group switched off in Item Lists can't be given to a customer from the form."""
+    from app.services import masters_service
+
+    try:
+        await masters_service.refuse_switched_off_values("parties", fields, {"category": party.category} if party else None)
+    except masters_service.MastersError as exc:
+        raise PartyError(exc.message) from exc
 
 
 async def _editable(party_id: str) -> Party:
@@ -98,7 +109,9 @@ async def _editable(party_id: str) -> Party:
 
 async def update(party_id: str, data: PartyUpdate) -> Party:
     party = await _editable(party_id)
-    for key, value in _to_model_fields(data.model_dump(exclude_unset=True)).items():
+    changes = _to_model_fields(data.model_dump(exclude_unset=True))
+    await _refuse_switched_off_group(changes, party)
+    for key, value in changes.items():
         if key in ("name", "due_days", "credit_allowed", "credit_limit", "tier", "active") and value is None:
             continue
         setattr(party, key, value)

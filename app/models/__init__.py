@@ -14,6 +14,7 @@ from app.models.activity import ActivityLog
 from app.models.catalog import PaymentMethod, Product, ProductAlias, ProductPriceChange, ProductSupplier
 from app.models.corrections import Adjustment, PhysicalCount
 from app.models.device import Device
+from app.models.fixed_assets import DepreciationRun, DepreciationRunLine, FixedAsset
 from app.models.gift_voucher import GiftVoucher, VoucherRedemption
 from app.models.grn import GRN, Batch, GRNLine
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
@@ -22,11 +23,13 @@ from app.models.held_bill import HeldBill
 from app.models.identity import IDENTITY_PK, BranchIdentity, SyncState
 from app.models.inventory import StockMovement, balance_for
 from app.models.location import Location
+from app.models.masters import ListEntry, ShopSetting
 from app.models.notice import Notice, NoticeRead
 from app.models.member import LoyaltyEntry, LoyaltySettings, Member
 from app.models.party import Party, PartyContact
 from app.models.permission import UserPermission
 from app.models.purchase_return import PurchaseReturn, PurchaseReturnLine
+from app.models.requisition import StockRequest, StockRequestLine
 from app.models.role import Role, RoleDefaultPermission
 from app.models.sales import ReturnLine, ReturnRecord, SaleLine, SaleRecord, SaleTender
 from app.models.sequence import Counter, next_value
@@ -37,6 +40,8 @@ from app.models.transfer import KnownBranch, Transfer, TransferLine
 from app.models.user import User
 
 __all__ = [
+    "StockRequest",
+    "StockRequestLine",
     "Account",
     "AccountCategory",
     "AccountGroup",
@@ -47,6 +52,9 @@ __all__ = [
     "CustomerPayment",
     "Voucher",
     "VoucherLine",
+    "FixedAsset",
+    "DepreciationRun",
+    "DepreciationRunLine",
     "Notice",
     "NoticeRead",
     "ActivityLog",
@@ -63,6 +71,8 @@ __all__ = [
     "ProductPriceChange",
     "PaymentMethod",
     "Location",
+    "ListEntry",
+    "ShopSetting",
     "Supplier",
     "Device",
     "Party",

@@ -32,7 +32,7 @@ PKT_OFFSET_HOURS = 5
 # A dashboard is a glance. A real catalog can put thousands of items under the low-stock line, so
 # only the most urgent travel — `totalOfKind` carries the true count alongside.
 ALERTS_PER_KIND = 200
-LOW_STOCK_THRESHOLD = Decimal("20")
+LOW_STOCK_THRESHOLD = Decimal("20")  # the usual low stock level until a branch sets its own (masters_service)
 NEAR_EXPIRY_DAYS = 30
 
 # Item-level stock is the one genuinely large payload: one row per catalog product. Chunked so a
@@ -277,17 +277,22 @@ async def build_aggregates() -> dict:
 async def build_alerts() -> list[dict]:
     """Stock exceptions, ranked and trimmed here because this is the only side that can see the
     whole catalog. `totalOfKind` carries the real count so the Cloud never implies 200 is all."""
+    from app.services import masters_service
+
     balances = await _q("""
-        SELECT p.sku, p.name, b.qty
+        SELECT p.sku, p.name, b.qty, p.reorder_level
         FROM (SELECT product_id, SUM(qty) AS qty FROM stock_movements GROUP BY product_id) b
         JOIN products p ON p.id = b.product_id
     """)
+    # The Item's own reorder level, else the branch's usual low stock level: the same rule as the branch's own figures.
+    usual = await masters_service.low_stock_level()
     out_of_stock, low_stock = [], []
     for r in balances:
         qty = Decimal(str(r["qty"] or 0))
+        level = Decimal(str(r["reorder_level"])) if r["reorder_level"] not in (None, "") else usual
         if qty <= 0:
             out_of_stock.append({"sku": r["sku"], "name": r["name"], "qty": qty, "expiry": None, "detail": None})
-        elif qty < LOW_STOCK_THRESHOLD:
+        elif qty < level:
             low_stock.append({"sku": r["sku"], "name": r["name"], "qty": qty, "expiry": None, "detail": f"{qty} left"})
 
     now = datetime.now(timezone.utc)

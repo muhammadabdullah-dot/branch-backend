@@ -12,6 +12,8 @@ Every shipment goes step by step, and nothing moves until the step before it is 
     2. The other branch says it can be sent (relayed by head office) — or declines.
     3. This branch dispatches it: the stock leaves its location only now.
     4. The other branch receives it and accepts or disputes; that comes back by sync.
+    Head office can also ask this branch to send (another branch's approved stock request, or head office's own
+    suggestion): the shipment arrives here with no location, and whoever dispatches it says where it leaves from.
 
 A branch that stays offline for a long time can be sent to without its acknowledgement: head office's
 Warehouse Manager does that with a written reason, and this branch is told.
@@ -105,7 +107,7 @@ async def acknowledge_inbound(user: User, transfer_id: str, note: str | None) ->
 async def decline_inbound(user: User, transfer_id: str, reason: str | None) -> Transfer:
     """This branch says don't send it — no space, not needed, wrong Items — and why."""
     if not (reason or "").strip():
-        raise TransferError("Say why it shouldn't be sent — the sender needs to know what to change.")
+        raise TransferError("Say why it shouldn't be sent. The sender needs to know what to change.")
     transfer = await _inbound_waiting(transfer_id)
     now = _now()
     transfer.ack_status, transfer.ack_at, transfer.ack_by, transfer.ack_note = "declined", now, user, reason.strip()[:255]
@@ -159,7 +161,7 @@ async def receive(
     for line in transfer.lines:
         qty = received.get(str(line.product_id))
         if qty is None:
-            raise TransferError(f"Enter what arrived of {line.product.name} — 0 if none did.")
+            raise TransferError(f"Enter what arrived of {line.product.name}, or 0 if none did.")
         if qty < ZERO or qty > line.qty_sent:
             raise TransferError(f"{line.product.name}: received must be between 0 and the {line.qty_sent.normalize():f} sent.")
         line.qty_received = qty
@@ -188,7 +190,7 @@ async def receive(
     transfer.location = location
     if short or dispute:
         transfer.dispute_open = True
-        transfer.dispute_note = (note or "").strip() or "Short receipt — less arrived than was sent."
+        transfer.dispute_note = (note or "").strip() or "Short receipt: less arrived than was sent."
     await transfer.save()
     if transfer.origin != "local":
         await _event(user, transfer, {
@@ -206,9 +208,9 @@ async def hold_inbound(user: User, transfer_id: str, reason: str) -> Transfer:
     if not transfer:
         raise TransferError("That incoming shipment doesn't exist.")
     if transfer.status not in ("dispatched", "in_transit"):
-        raise TransferError(f"{transfer.number or 'This shipment'} can't be put on hold — it's {transfer.status.replace('_', ' ')}.")
+        raise TransferError(f"{transfer.number or 'This shipment'} can't be put on hold because it's {transfer.status.replace('_', ' ')}.")
     if not (reason or "").strip():
-        raise TransferError("Say why it's being held — damaged, wrong goods, not expected…")
+        raise TransferError("Say why it's being held, for example damaged, wrong goods or not expected.")
     now = _now()
     transfer.status = "held"
     transfer.hold_reason = reason.strip()[:255]
@@ -334,15 +336,20 @@ async def approve_outbound(user: User, transfer_id: str) -> Transfer:
     if not transfer:
         raise TransferError("That outgoing shipment doesn't exist.")
     if transfer.status != "awaiting_approval":
-        raise TransferError(f"{transfer.number} isn't waiting for approval — it's {transfer.status.replace('_', ' ')}.")
+        raise TransferError(f"{transfer.number} isn't waiting for approval. It's {transfer.status.replace('_', ' ')}.")
     await _ask_destination(user, transfer, approved_by=user)
     await transfer.fetch_related("lines")
     return transfer
 
 
 @atomic()
-async def dispatch_ready(user: User, transfer_id: str, vehicle: str | None, driver: str | None) -> Transfer:
-    """The other branch agreed: the stock leaves its location now, and head office relays it."""
+async def dispatch_ready(
+    user: User, transfer_id: str, vehicle: str | None, driver: str | None, location_id: str | None = None,
+) -> Transfer:
+    """The other branch agreed: the stock leaves its location now, and head office relays it.
+
+    A shipment head office asked this branch to send (a branch's stock request, or the Executive's suggestion) has
+    no location yet, so the person dispatching says where it leaves from."""
     transfer = await Transfer.get_or_none(id=transfer_id, direction="outbound")
     if not transfer:
         raise TransferError("That outgoing shipment doesn't exist.")
@@ -351,7 +358,14 @@ async def dispatch_ready(user: User, transfer_id: str, vehicle: str | None, driv
             raise TransferError(f"{transfer.from_warehouse} hasn't agreed to receive {transfer.number} yet.")
         if transfer.ack_status == "declined":
             raise TransferError(f"{transfer.from_warehouse} declined {transfer.number}: {transfer.ack_note or 'no reason given'}.")
-        raise TransferError(f"{transfer.number} can't be dispatched — it's {transfer.status.replace('_', ' ')}.")
+        raise TransferError(f"{transfer.number} can't be dispatched because it's {transfer.status.replace('_', ' ')}.")
+    if location_id:
+        location = await Location.get_or_none(id=location_id)
+        if not location or not location.active:
+            raise TransferError("Pick an active location the stock leaves from.")
+        transfer.location = location
+    elif not transfer.location_id:
+        raise TransferError("Pick the location the stock leaves from.")
     transfer.vehicle = (vehicle or "").strip() or transfer.vehicle
     transfer.driver = (driver or "").strip() or transfer.driver
     if not transfer.vehicle or not transfer.driver:
@@ -391,12 +405,14 @@ async def cancel_outbound(user: User, transfer_id: str, reason: str | None) -> T
     if not transfer:
         raise TransferError("That outgoing shipment doesn't exist.")
     if transfer.status not in ("awaiting_approval", "requested", "approved"):
-        raise TransferError(f"{transfer.number} has already left — it can't be cancelled.")
+        raise TransferError(f"{transfer.number} has already left, so it can't be cancelled.")
     if transfer.requested_by_id != user.id and not await has_permission(user, "inventory.transfers.approve", "X"):
         raise TransferError("Only the person who asked, or someone who approves shipments, can cancel it.")
     told_head_office = transfer.status != "awaiting_approval"
     transfer.status = "cancelled"
-    transfer.notes = ((transfer.notes or "") + (f" — cancelled: {reason.strip()}" if reason and reason.strip() else " — cancelled"))[:255]
+    earlier = (transfer.notes or "").rstrip(". ")
+    cancelled = f"Cancelled: {reason.strip()}" if reason and reason.strip() else "Cancelled"
+    transfer.notes = (f"{earlier}. {cancelled}" if earlier else cancelled)[:255]
     await transfer.save()
     if told_head_office:
         await _event(user, transfer, {"event": "cancelled", "transferId": str(transfer.id), "reason": (reason or "").strip() or None, "by": user.name})
@@ -515,7 +531,7 @@ async def apply_inbound(state: dict) -> str:
     old_status = before[0] if before else None
     if transfer.status == "dispatched" and old_status != "dispatched" and old_status != "held":
         await _notify("transfer.dispatched", transfer, f"{_label(transfer)} is on its way from {transfer.from_warehouse}",
-                      f"Vehicle {transfer.vehicle or '—'}, driver {transfer.driver or '—'}. Count it in when it arrives.", RECEIVERS)
+                      f"Vehicle {transfer.vehicle or '-'}, driver {transfer.driver or '-'}. Count it in when it arrives.", RECEIVERS)
     if transfer.override_reason and (not before or not before[2]):
         await _notify("transfer.sent_without_answer", transfer, f"{transfer.from_warehouse} is sending {_label(transfer)} without this branch's go-ahead",
                       f"{transfer.override_by_name or 'Head office'}: “{transfer.override_reason}”", RECEIVERS, tone="warning")
@@ -524,11 +540,52 @@ async def apply_inbound(state: dict) -> str:
     return outcome
 
 
+async def _outbound_from_head_office(state: dict) -> Transfer | None:
+    """Head office asked this branch to send stock to another branch (an approved stock request, or head office's
+    own suggestion). There is no copy here yet: make one, with no location until someone dispatches it."""
+    from app.services import registration_service
+
+    identity = await registration_service.current()
+    source = state.get("source") or {}
+    destination = state.get("destination") or {}
+    if identity is None or str(source.get("code") or "").upper() != identity.code.upper() or not state.get("id"):
+        return None
+    status = state.get("status") or "requested"
+    if status in ("cancelled", "received", "received_short"):
+        return None  # nothing left for this branch to do; it never saw the shipment
+    transfer = await Transfer.create(
+        id=state["id"], number=state.get("number"), direction="outbound", origin="cloud",
+        from_warehouse=(destination.get("name") or destination.get("code") or "Another branch")[:120],
+        counterparty_code=destination.get("code"), status=status, vehicle=state.get("vehicle"), driver=state.get("driver"),
+        notes=state.get("notes"), requested_at=_dt(state.get("requestedAt")) or _now(), **_take_answer(None, state),
+    )
+    for line in state.get("lines") or []:
+        product = await _product_for(line)
+        await TransferLine.create(
+            transfer=transfer, product=product, sku=line.get("sku"), qty_sent=Decimal(str(line.get("qtySent") or "0")),
+            unit_cost=Decimal(str(line["unitCost"])) if line.get("unitCost") not in (None, "") else None,
+        )
+    ready = transfer.status == "approved" and transfer.ack_status in READY_TO_SEND
+    await _notify(
+        "transfer.asked_to_send", transfer, f"Head office asks this branch to send {_label(transfer)} to {transfer.from_warehouse}",
+        (transfer.ack_note or transfer.notes or "") + (" Pick where it leaves from and dispatch it." if ready else f" {transfer.from_warehouse} is asked to agree first."),
+        SENDERS, tone="warning" if ready else "info",
+    )
+    return transfer
+
+
 @atomic()
 async def apply_outbound(state: dict) -> str:
+    # A stock request's answer travels on this same message kind, so a branch whose software predates a separate
+    # kind for it still gets it. See requisition_service.apply_update.
+    if state.get("kind") == "requisition":
+        from app.services import requisition_service
+
+        return await requisition_service.apply_update(state.get("requisition") or {})
     transfer = await Transfer.get_or_none(id=state.get("id"), direction="outbound").prefetch_related("lines")
     if not transfer:
-        return "not-here"
+        created = await _outbound_from_head_office(state)
+        return "created" if created else "not-here"
     if transfer.status in ("received", "received_short") and state.get("status") not in ("received", "received_short"):
         return "older-than-receipt"
     old_status, old_ack = transfer.status, transfer.ack_status

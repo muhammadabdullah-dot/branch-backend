@@ -220,7 +220,15 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
 
     till = await till_service.session_for(cashier)
     if not till:
-        raise SaleError("No Till is open — open one at your counter before taking payment")
+        raise SaleError("No Till is open. Open one at your counter before taking payment")
+
+    # A payment method the branch has switched off (Branch Console > Lists and Settings) can't be taken.
+    from app.services import masters_service
+
+    try:
+        await masters_service.refuse_switched_off_methods(code for code, amount in payload.tenders.items() if amount > 0)
+    except masters_service.MastersError as exc:
+        raise SaleError(exc.message) from exc
 
     party = await _resolve_party(payload.partyId)
     products: dict[str, Product] = {}
@@ -234,6 +242,25 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
             alias = await ProductAlias.get_or_none(code=line.aliasCode.strip(), product_id=product.id)
             if alias:
                 aliases[index] = alias
+
+    # Empty means empty: every Item on the bill must be in stock for its whole quantity. What this same bill takes back
+    # (an exchange) is back on the shelf first, so it counts.
+    from app.services import stock_guard
+
+    wanted: dict[str, Decimal] = {}
+    taken_back: dict[str, Decimal] = {}
+    for line in payload.lines:
+        bucket = taken_back if line.isReturn else wanted
+        bucket[line.productId] = bucket.get(line.productId, ZERO) + line.qty
+    if wanted:
+        held = await stock_guard.on_hand(list(wanted))
+        short = []
+        for pid, qty in wanted.items():
+            have = held.get(pid, ZERO) + taken_back.get(pid, ZERO)
+            if have < qty:
+                short.append(f"{products[pid].name} ({stock_guard.qty_text(have)} in stock, {stock_guard.qty_text(qty)} on the bill)")
+        if short:
+            raise SaleError("Not enough stock: " + "; ".join(short) + ". Lower the quantity or take the Item off the bill.")
 
     gross = sum((_line_gross(l, l.unitPrice) for l in payload.lines), ZERO)
     # The Item's own discount comes first and needs no one's approval — it's set on the Item. A line
@@ -275,7 +302,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
     if effective_pct > own_limit + discount_approval_service.PERCENT_TOLERANCE:
         if not payload.discountApprovalToken:
             raise SaleError(
-                f"Discount {effective_pct:.1f}% is more than your {own_limit.normalize():f}% limit — someone with a higher limit needs to approve it"
+                f"Discount {effective_pct:.1f}% is more than your {own_limit.normalize():f}% limit, so someone with a higher limit needs to approve it"
             )
         # A signed approval from POST /sales/discount-approvals, never a bare user id — see
         # discount_approval_service for what the old id-on-trust check let a salesperson do.
@@ -288,7 +315,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
 
     received = sum(payload.tenders.values(), ZERO)
     if received < net_value:
-        raise SaleError(f"Payment not covered — remaining {money_str(net_value - received)}")
+        raise SaleError(f"Payment not covered. Still to pay: {money_str(net_value - received)}")
     cash_back = max(ZERO, received - net_value)
 
     # Members and points. Earned on what the customer actually paid — never on what points paid for.
@@ -307,12 +334,12 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
         except members_service.MemberError as exc:
             raise SaleError(exc.message) from exc
         if points_redeemed > member.points_balance:
-            raise SaleError(f"{member.name} has {member.points_balance} points — not {points_redeemed}.")
+            raise SaleError(f"{member.name} has {member.points_balance} points, not {points_redeemed}.")
         if points_redeemed < loyalty.min_redeem_points:
             raise SaleError(f"Points can be used from {loyalty.min_redeem_points} at a time.")
         cap = (net_value * loyalty.max_redeem_percent / Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         if points_amount > cap:
-            raise SaleError(f"Points can pay up to {loyalty.max_redeem_percent.normalize():f}% of a bill — Rs {cap} on this one.")
+            raise SaleError(f"Points can pay up to {loyalty.max_redeem_percent.normalize():f}% of a bill, which is Rs {cap} on this one.")
     earned_points = 0
     if member and loyalty.enabled:
         earned_points = members_service.points_for_amount(net_value - points_amount, loyalty)
@@ -370,15 +397,17 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
             unit_cost=product.avg_cost,
             tax_amount=((_line_gross(line, line.unitPrice) - line_disc) * product.tax_rate / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
         )
-        await StockMovement.create(
-            product=product,
-            location=location,
-            kind="return" if line.isReturn else "sell",
-            qty=line.qty if line.isReturn else -line.qty,
-            origin_user=cashier,
-            at=datetime.now(timezone.utc),
-            unit_cost=product.avg_cost,
-        )
+
+    # Returns on the bill go back on the shelf first; each sale then takes from Main Store, then the branch's other
+    # locations, never leaving any of them below zero.
+    now = datetime.now(timezone.utc)
+    for line in sorted(payload.lines, key=lambda l: not l.isReturn):
+        product = products[line.productId]
+        if line.isReturn:
+            await StockMovement.create(product=product, location=location, kind="return", qty=line.qty, origin_user=cashier, at=now, unit_cost=product.avg_cost)
+            continue
+        for place, qty in await stock_guard.plan_sale(product, line.qty):
+            await StockMovement.create(product=product, location=place, kind="sell", qty=-qty, origin_user=cashier, at=now, unit_cost=product.avg_cost)
 
     for code, amount in payload.tenders.items():
         if amount > 0:

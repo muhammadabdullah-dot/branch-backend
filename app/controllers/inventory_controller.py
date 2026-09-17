@@ -30,7 +30,7 @@ from app.schemas.inventory import (
     TransferReceiveRequest,
     TransferSendRequest,
 )
-from app.services import inventory_service, transfers_service
+from app.services import inventory_service, masters_service, transfers_service
 
 # Well under SQLite's parameter cap, so a full 5000-row movements page still resolves in a
 # handful of queries rather than blowing the IN(...) limit.
@@ -127,7 +127,7 @@ async def list_grns(
     return GRNListOut(items=[_grn_out(g, names) for g in grns], total=total)
 
 
-def _purchase_return_out(r: PurchaseReturn, names: dict[str, Product]) -> PurchaseReturnOut:
+def _purchase_return_out(r: PurchaseReturn, names: dict[str, Product], reasons: dict | None = None) -> PurchaseReturnOut:
     lines = []
     for l in r.lines:
         product_id = str(l.product_id)
@@ -138,7 +138,8 @@ def _purchase_return_out(r: PurchaseReturn, names: dict[str, Product]) -> Purcha
     return PurchaseReturnOut(
         id=str(r.id), returnNumber=r.return_number, supplierId=str(r.supplier_id),
         locationId=str(r.location_id), grnId=str(r.grn_id) if r.grn_id else None,
-        reason=r.reason, notes=r.notes, submittedByUserId=str(r.submitted_by_id), at=r.at, lines=lines,
+        reason=r.reason, reasonLabel=_reason_label(reasons, r.reason), notes=r.notes, submittedByUserId=str(r.submitted_by_id),
+        at=r.at, lines=lines,
     )
 
 
@@ -151,7 +152,7 @@ async def create_purchase_return(user: User, payload: PurchaseReturnCreateReques
         ret = await inventory_service.create_purchase_return(user, payload)
     except inventory_service.InventoryError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
-    return _purchase_return_out(ret, await _names_for(_purchase_return_product_ids([ret])))
+    return _purchase_return_out(ret, await _names_for(_purchase_return_product_ids([ret])), await masters_service.reason_entries("purchase-return"))
 
 
 async def list_purchase_returns(
@@ -161,7 +162,8 @@ async def list_purchase_returns(
     offset = max(offset, 0)
     returns, total = await inventory_service.list_purchase_returns(limit, offset, from_at, to_at)
     names = await _names_for(_purchase_return_product_ids(returns))
-    return PurchaseReturnListOut(items=[_purchase_return_out(r, names) for r in returns], total=total)
+    reasons = await masters_service.reason_entries("purchase-return")
+    return PurchaseReturnListOut(items=[_purchase_return_out(r, names, reasons) for r in returns], total=total)
 
 
 def _batch_out(b: Batch, names: dict[str, Product]) -> BatchOut:
@@ -218,12 +220,20 @@ async def approve_count(user: User, count_id: str) -> CountOut:
     return _count_out(count, await _names_for({str(count.product_id)}))
 
 
-def _adjustment_out(a: Adjustment, names: dict[str, Product]) -> AdjustmentOut:
+def _reason_label(reasons: dict | None, code: str | None) -> str | None:
+    """The reason's wording today. A record keeps its code; the list says what it's called."""
+    entry = (reasons or {}).get(code)
+    return entry.name if entry else code
+
+
+def _adjustment_out(a: Adjustment, names: dict[str, Product], reasons: dict | None = None) -> AdjustmentOut:
     product_id = str(a.product_id)
     name, sku = _name_of(names, product_id)
+    entry = (reasons or {}).get(a.reason)
     return AdjustmentOut(
         id=str(a.id), productId=product_id, productName=name, productSku=sku,
-        locationId=str(a.location_id), reason=a.reason,
+        locationId=str(a.location_id), reason=a.reason, reasonLabel=_reason_label(reasons, a.reason),
+        adds=(entry.effect == "add") if entry else a.reason == "found",
         magnitude=a.magnitude, notes=a.notes, status=a.status, submittedByUserId=str(a.submitted_by_id),
         decidedByUserId=str(a.decided_by_id) if a.decided_by_id else None, at=a.at,
     )
@@ -234,7 +244,7 @@ async def submit_adjustment(user: User, payload: AdjustmentSubmitRequest) -> Adj
         adjustment = await inventory_service.submit_adjustment(user, payload)
     except inventory_service.InventoryError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
-    return _adjustment_out(adjustment, await _names_for({str(adjustment.product_id)}))
+    return _adjustment_out(adjustment, await _names_for({str(adjustment.product_id)}), await masters_service.reason_entries("adjustment"))
 
 
 async def list_adjustments(
@@ -244,7 +254,8 @@ async def list_adjustments(
     offset = max(offset, 0)
     adjustments, total = await inventory_service.list_adjustments(limit, offset, from_at, to_at)
     names = await _names_for({str(a.product_id) for a in adjustments})
-    return AdjustmentListOut(items=[_adjustment_out(a, names) for a in adjustments], total=total)
+    reasons = await masters_service.reason_entries("adjustment")
+    return AdjustmentListOut(items=[_adjustment_out(a, names, reasons) for a in adjustments], total=total)
 
 
 async def approve_adjustment(user: User, adjustment_id: str) -> AdjustmentOut:
@@ -252,7 +263,7 @@ async def approve_adjustment(user: User, adjustment_id: str) -> AdjustmentOut:
         adjustment = await inventory_service.approve_adjustment(user, adjustment_id)
     except inventory_service.InventoryError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
-    return _adjustment_out(adjustment, await _names_for({str(adjustment.product_id)}))
+    return _adjustment_out(adjustment, await _names_for({str(adjustment.product_id)}), await masters_service.reason_entries("adjustment"))
 
 
 async def reject_adjustment(user: User, adjustment_id: str) -> AdjustmentOut:
@@ -260,7 +271,7 @@ async def reject_adjustment(user: User, adjustment_id: str) -> AdjustmentOut:
         adjustment = await inventory_service.reject_adjustment(user, adjustment_id)
     except inventory_service.InventoryError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
-    return _adjustment_out(adjustment, await _names_for({str(adjustment.product_id)}))
+    return _adjustment_out(adjustment, await _names_for({str(adjustment.product_id)}), await masters_service.reason_entries("adjustment"))
 
 
 def _transfer_out(t: Transfer, names: dict[str, Product]) -> TransferOut:

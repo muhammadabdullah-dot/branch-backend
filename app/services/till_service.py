@@ -153,16 +153,24 @@ async def record_movement(
     return movement
 
 
+async def _session_bills(till: TillSession) -> tuple[list[SaleRecord], list[ReturnRecord]]:
+    """The bills and returns rung into this drawer. For a drawer from before bills carried their session, those
+    between its opening and its closing (still open: up to now)."""
+    linked = await SaleRecord.filter(till_session=till).prefetch_related("tenders")
+    if linked or till.opened_at >= LINKED_FROM:
+        return linked, await ReturnRecord.filter(till_session=till)
+    sales = SaleRecord.filter(at__gte=till.opened_at)
+    returns = ReturnRecord.filter(at__gte=till.opened_at)
+    if till.closed_at:
+        # Read again after it closed, a later day's bills must not land in it.
+        sales, returns = sales.filter(at__lte=till.closed_at), returns.filter(at__lte=till.closed_at)
+    return await sales.prefetch_related("tenders"), await returns
+
+
 async def compute_breakdown(till: TillSession) -> dict:
     """The drawer's own bills, not the branch's. Sessions opened before bills carried a session fall
     back to the clock, which was exactly right while only one till could be open at a time."""
-    linked = await SaleRecord.filter(till_session=till).prefetch_related("tenders")
-    if linked or till.opened_at >= LINKED_FROM:
-        sales = linked
-        returns = await ReturnRecord.filter(till_session=till)
-    else:
-        sales = await SaleRecord.filter(at__gte=till.opened_at).prefetch_related("tenders")
-        returns = await ReturnRecord.filter(at__gte=till.opened_at)
+    sales, returns = await _session_bills(till)
     gross_sale = sum((s.gross for s in sales), ZERO)
     total_disc = sum((s.disc_total for s in sales), ZERO)
     gst_total = sum((s.gst for s in sales), ZERO)
@@ -247,3 +255,77 @@ async def list_closed_sessions(
     total = await qs.count()
     sessions = await qs.order_by("-closed_at").offset(offset).limit(limit).prefetch_related("opened_by", "counter")
     return sessions, total
+
+
+# ── one session's report: X while the drawer is open, Z once it's closed ────────────────────────────
+
+async def list_report_sessions(from_at: datetime | None, to_at: datetime | None, limit: int = 200) -> list[TillSession]:
+    """Every drawer open now, and the ones that closed in the window: what X/Z lists to open a report from."""
+    open_now = await TillSession.filter(status="open").order_by("-opened_at").prefetch_related("opened_by", "closed_by", "counter")
+    closed = TillSession.filter(status="closed")
+    if from_at:
+        closed = closed.filter(closed_at__gte=from_at)
+    if to_at:
+        closed = closed.filter(closed_at__lte=to_at)
+    closed_rows = await closed.order_by("-closed_at").limit(max(1, min(limit, 500))).prefetch_related("opened_by", "closed_by", "counter")
+    return [*open_now, *closed_rows]
+
+
+async def session_report(session_id: str) -> dict:
+    """Everything one drawer took and paid out, for printing: X (still open, figures so far) or Z (closed, with
+    what was counted and the short or over)."""
+    from app.models import PaymentMethod
+
+    till = await TillSession.get_or_none(id=session_id).prefetch_related("opened_by", "closed_by", "counter")
+    if not till:
+        raise TillError("That till session doesn't exist.")
+    breakdown = await compute_breakdown(till)
+    sales, returns = await _session_bills(till)
+    method_names = {m.code: m.name for m in await PaymentMethod.all()}
+    tenders: dict[str, dict] = {}
+    for sale in sales:
+        for tender in sale.tenders:
+            row = tenders.setdefault(tender.code, {"code": tender.code, "name": method_names.get(tender.code, tender.code), "amount": ZERO, "bills": 0})
+            row["amount"] += tender.amount
+            row["bills"] += 1
+    refunds: dict[str, dict] = {}
+    for record in returns:
+        code = record.refund_method or "CASH"
+        row = refunds.setdefault(code, {"code": code, "name": method_names.get(code, code), "amount": ZERO, "count": 0})
+        row["amount"] += record.refund_total
+        row["count"] += 1
+    people: dict[str, dict] = {}
+    cashier_ids = {str(s.cashier_id) for s in sales} | {str(r.cashier_id) for r in returns}
+    names = {str(u.id): u.name for u in await User.filter(id__in=list(cashier_ids))} if cashier_ids else {}
+    for sale in sales:
+        row = people.setdefault(str(sale.cashier_id), {"name": names.get(str(sale.cashier_id), "-"), "bills": 0, "amount": ZERO})
+        row["bills"] += 1
+        row["amount"] += sale.grand_total
+    movements = await CashMovement.filter(till_session=till).order_by("at").prefetch_related("account", "user")
+    closed = till.status == "closed"
+    expected = till.net_cash if closed and till.net_cash is not None else breakdown["netCash"]
+    counter = till.counter
+    return {
+        "sessionId": str(till.id), "sessionNumber": till.session_number, "status": till.status, "kind": "Z" if closed else "X",
+        "counterName": counter.name if counter else None, "counterCode": counter.code if counter else None,
+        "openedBy": till.opened_by.name if till.opened_by else None, "closedBy": till.closed_by.name if till.closed_by else None,
+        "openedAt": till.opened_at, "closedAt": till.closed_at, "openingNotes": till.opening_notes,
+        "openingDenominations": till.opening_denominations or {}, "closingDenominations": till.closing_denominations,
+        "invoices": len(sales), "netSale": sum((s.grand_total for s in sales), ZERO),
+        "tenders": sorted(tenders.values(), key=lambda r: (r["code"] != "CASH", -r["amount"])),
+        "returnsCount": len(returns), "returnsTotal": sum((r.refund_total for r in returns), ZERO),
+        "refunds": sorted(refunds.values(), key=lambda r: (r["code"] != "CASH", -r["amount"])),
+        "people": sorted(people.values(), key=lambda r: -r["amount"]),
+        "movements": [
+            {
+                "kind": m.kind, "amount": m.amount, "at": m.at, "notes": m.notes, "payee": m.payee,
+                "accountName": m.account.name if m.account else None, "by": m.user.name if m.user else None,
+            }
+            for m in movements
+        ],
+        **breakdown,
+        "expectedCash": expected,
+        "countedCash": till.counted_cash if closed else None,
+        "variance": till.variance if closed else None,
+        "generatedAt": datetime.now(timezone.utc),
+    }

@@ -62,7 +62,7 @@ async def quote(against: str, lines: list[tuple[str, Decimal]]) -> dict:
         remaining = sold_qty - already
         if qty > remaining:
             raise ReturnError(
-                f"Cannot return {money_str(qty)} of {product.name} against {sale.invoice_number} — only {money_str(remaining)} "
+                f"Cannot return {money_str(qty)} of {product.name} against {sale.invoice_number}. Only {money_str(remaining)} "
                 f"remains returnable ({money_str(already)} already returned of {money_str(sold_qty)} sold)"
             )
         gross = sum((sl.qty * sl.unit_price for sl in sold_lines), ZERO)
@@ -93,7 +93,7 @@ async def create_return(cashier: User, payload: ReturnCreateRequest) -> ReturnRe
 
     till = await till_service.session_for(cashier)
     if not till:
-        raise ReturnError("No Till is open — open one at your counter before processing a return")
+        raise ReturnError("No Till is open. Open one at your counter before processing a return")
     merged: dict[str, Decimal] = {}
     for line in payload.lines:
         merged[line.productId] = merged.get(line.productId, ZERO) + line.qty
@@ -104,6 +104,18 @@ async def create_return(cashier: User, payload: ReturnCreateRequest) -> ReturnRe
     method = (payload.refundMethod or priced["suggestedMethod"]).upper()
     if method not in REFUND_METHODS:
         raise ReturnError("Pick how the money goes back: cash, off the customer's balance, card, bank, Easypaisa or JazzCash.")
+    from app.services import masters_service
+
+    reason = (payload.reason or "").strip() or None
+    try:
+        # Money can't go back through a method the branch has switched off. A credit bill always goes back off the
+        # customer's balance, whatever Credit is set to for new sales.
+        if method not in ("CASH", "CREDIT"):
+            await masters_service.refuse_switched_off_methods([method])
+        if reason:
+            reason = (await masters_service.require_reason("sale-return", reason)).code
+    except masters_service.MastersError as exc:
+        raise ReturnError(exc.message) from exc
     refund_total = priced["refundTotal"]
     if method == "CREDIT":
         party = sale.party
@@ -115,7 +127,7 @@ async def create_return(cashier: User, payload: ReturnCreateRequest) -> ReturnRe
     record = await ReturnRecord.create(
         against=sale, cashier=cashier, till_session=till, refund_total=refund_total, refund_method=method,
         refund_reference=(payload.refundReference or "").strip()[:40] or None,
-        tax_total=priced["taxTotal"], rounding=priced["rounding"],
+        tax_total=priced["taxTotal"], rounding=priced["rounding"], reason=reason,
     )
 
     location = await Location.get(id=DEFAULT_LOCATION_ID)
@@ -182,12 +194,12 @@ async def reverse_voucher_sale(invoice_number: str, processed_by: User, reason: 
     if not sale:
         raise ReturnError(f"Invoice {invoice_number} not found")
     if await ReturnRecord.exists(against=sale):
-        raise ReturnError(f"{sale.invoice_number} already has a return against it — sort that out by hand, not with this.")
+        raise ReturnError(f"{sale.invoice_number} already has a return against it, so sort that out by hand, not with this.")
     tenders = list(sale.tenders)
     if len(tenders) != 1 or tenders[0].code != "VOUCHER":
         raise ReturnError(f"{sale.invoice_number} wasn't paid entirely by one gift voucher.")
     if any(line.is_return for line in sale.lines):
-        raise ReturnError(f"{sale.invoice_number} has return lines on it — reverse it by hand.")
+        raise ReturnError(f"{sale.invoice_number} has return lines on it, so reverse it by hand.")
     redemptions = await VoucherRedemption.filter(invoice_number=sale.invoice_number).prefetch_related("voucher")
     amount = tenders[0].amount
     if len(redemptions) != 1 or redemptions[0].amount != amount:

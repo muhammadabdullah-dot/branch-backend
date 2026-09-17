@@ -10,6 +10,7 @@ from app.schemas.sales import (
     DiscountApprovalRequest,
     NextInvoiceNumberOut,
     PaymentProofOut,
+    ReceiptReprintOut,
     ReturnCreateRequest,
     ReturnQuoteRequest,
     ReturnRecordOut,
@@ -31,6 +32,8 @@ _lookup_for_sale_or_return = require_any_permission(("store.billing", "R"), ("st
 # store.billing on their own (a Sales Manager reading X/Z, or a Branch Manager reading
 # their own Dashboard, may legitimately lack store.billing).
 _list_read = require_any_permission(("store.xz", "R"), ("reports", "R"), ("branch-console.dashboard", "R"))
+# Printing a bill again: its own tick, because a second copy of a paid bill is what a refund fraud starts from.
+_reprint = require_permission("store.reprint", "X")
 
 
 @router.get("/sales/next-invoice-number", response_model=NextInvoiceNumberOut)
@@ -81,6 +84,18 @@ async def request_discount_approval(
 @router.get("/sales/{invoice_number}", response_model=SaleRecordOut)
 async def get_sale(invoice_number: str, user: User = Depends(_lookup_for_sale_or_return)) -> SaleRecordOut:
     return await sales_controller.get_by_invoice(invoice_number)
+
+
+# Looking first (the preview) isn't a reprint; the POST that sends it to the printer is, and the activity log records
+# it with who did it. Both need the reprint tick and nothing else, so it works from Branch figures and from Returns.
+@router.get("/sales/{invoice_number}/reprint", response_model=ReceiptReprintOut)
+async def reprint_preview(invoice_number: str, user: User = Depends(_reprint)) -> ReceiptReprintOut:
+    return await sales_controller.reprint(invoice_number, user)
+
+
+@router.post("/sales/{invoice_number}/reprint", response_model=ReceiptReprintOut)
+async def reprint_receipt(invoice_number: str, user: User = Depends(_reprint)) -> ReceiptReprintOut:
+    return await sales_controller.reprint(invoice_number, user)
 
 
 @router.post("/returns/quote")

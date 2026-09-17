@@ -308,13 +308,19 @@ async def list_grns(
     return grns, total
 
 
-PURCHASE_RETURN_REASONS = ("damaged", "expired", "wrong-item", "overstock", "other")
+async def _reason(kind: str, code: str):
+    """Reasons are the branch's own list (Branch Console > Lists and Settings > Reasons)."""
+    from app.services import masters_service
+
+    try:
+        return await masters_service.require_reason(kind, code)
+    except masters_service.MastersError as exc:
+        raise InventoryError(exc.message) from exc
 
 
 @atomic()
 async def create_purchase_return(user: User, payload: PurchaseReturnCreateRequest) -> PurchaseReturn:
-    if payload.reason not in PURCHASE_RETURN_REASONS:
-        raise InventoryError(f"Invalid reason {payload.reason}")
+    await _reason("purchase-return", payload.reason)
     # Returns still go back to a switched-off supplier: stopping buying from someone is exactly when
     # their leftover stock gets sent back.
     supplier = await Supplier.get_or_none(id=payload.supplierId)
@@ -355,9 +361,10 @@ async def create_purchase_return(user: User, payload: PurchaseReturnCreateReques
         await PurchaseReturnLine.create(
             purchase_return=ret, product=product, qty=line.qty, unit_price=line.unitPrice, tax_rate=rate, unit_cost=product.avg_cost,
         )
-        # Stock going out to the supplier — same ledger, negative qty, mirroring how a sale's
-        # own "sell" movement is posted. No stock-on-hand check: the rest of this system (sales
-        # included) already allows a balance to go negative rather than blocking on it.
+        # Stock going out to the supplier: same ledger, negative qty, like a sale. Only what the location holds can go back.
+        from app.services import stock_guard
+
+        await stock_guard.require_held(product, location, line.qty, "this return to the supplier")
         await StockMovement.create(
             product=product, location=location, kind="purchase-return",
             qty=-line.qty, reason=ret.return_number[:20], origin_user=user, at=datetime.now(timezone.utc), unit_cost=product.avg_cost,
@@ -446,6 +453,16 @@ async def approve_count(user: User, count_id: str) -> PhysicalCount:
     delta = count.counted_qty - count.system_qty
     if delta != 0:
         product = await Product.get(id=count.product_id)
+        if delta < 0:
+            # Stock may have been sold or moved since the count was made; the difference must still leave something.
+            from app.services import stock_guard
+
+            held = await stock_guard.held_at(str(count.product_id), str(count.location_id))
+            if held + delta < 0:
+                raise InventoryError(
+                    f"{product.name} has gone down to {stock_guard.qty_text(held)} since this count was made, so taking off its "
+                    f"difference of {stock_guard.qty_text(-delta)} would leave less than nothing. Reject it and count again."
+                )
         await StockMovement.create(
             product_id=count.product_id, location_id=count.location_id,
             kind="count-correction", qty=delta, origin_user=user, at=datetime.now(timezone.utc), unit_cost=product.avg_cost,
@@ -454,7 +471,7 @@ async def approve_count(user: User, count_id: str) -> PhysicalCount:
     count.approved_by = user
     await count.save()
     await _tell_submitter(count.counted_by_id, "count.approved", f"Your stock count was approved by {user.name}",
-                          f"The stock was corrected by {delta.normalize():f}." if delta else "It matched the system — nothing changed.", "/inventory/counts", "good")
+                          f"The stock was corrected by {delta.normalize():f}." if delta else "It matched the system, so nothing changed.", "/inventory/counts", "good")
     await OutboxEvent.create(
         aggregate_type="PhysicalCount", aggregate_id=str(count.id),
         payload={"event": "approved", "delta": str(delta)}, origin_user_id=str(user.id), origin_device_id=get_device_id(),
@@ -464,12 +481,22 @@ async def approve_count(user: User, count_id: str) -> PhysicalCount:
 
 @atomic()
 async def submit_adjustment(user: User, payload: AdjustmentSubmitRequest) -> Adjustment:
-    if payload.reason not in ("damage", "expiry", "found"):
-        raise InventoryError(f"Invalid reason {payload.reason}")
+    await _reason("adjustment", payload.reason)
     product = await Product.get_or_none(id=payload.productId)
     if not product:
         raise InventoryError(f"Unknown product {payload.productId}")
     location = await _active_location(payload.locationId)
+    # An adjustment that takes stock off can't take more than the location holds, now or when it is approved.
+    from app.models import ListEntry
+
+    entry = await ListEntry.get_or_none(kind="adjustment", code=payload.reason)
+    if not (entry.effect == "add" if entry else payload.reason == "found"):
+        from app.services import stock_guard
+
+        try:
+            await stock_guard.require_held(product, location, payload.magnitude, "this adjustment")
+        except stock_guard.StockShortError as exc:
+            raise InventoryError(exc.message) from exc
     adjustment = await Adjustment.create(
         product=product, location=location, reason=payload.reason,
         magnitude=payload.magnitude, notes=payload.notes or None,
@@ -500,8 +527,23 @@ async def approve_adjustment(user: User, adjustment_id: str) -> Adjustment:
     if not adjustment or adjustment.status != "pending":
         raise InventoryError("Adjustment not found or not pending")
     _refuse_own_work(user, adjustment.submitted_by_id, "adjustment")
-    signed_qty = adjustment.magnitude if adjustment.reason == "found" else -adjustment.magnitude
+    # A reason that adds stock (found) puts it back; every other reason takes it off. A reason switched off since the
+    # adjustment was submitted still decides it the same way.
+    from app.models import ListEntry
+
+    entry = await ListEntry.get_or_none(kind="adjustment", code=adjustment.reason)
+    adds = entry.effect == "add" if entry else adjustment.reason == "found"
+    signed_qty = adjustment.magnitude if adds else -adjustment.magnitude
     product = await Product.get(id=adjustment.product_id)
+    if not adds:
+        from app.models import Location
+        from app.services import stock_guard
+
+        location = await Location.get(id=adjustment.location_id)
+        try:
+            await stock_guard.require_held(product, location, adjustment.magnitude, "this adjustment")
+        except stock_guard.StockShortError as exc:
+            raise InventoryError(exc.message + " Reject it, or count the shelf first.") from exc
     await StockMovement.create(
         product_id=adjustment.product_id, location_id=adjustment.location_id,
         kind="adjust", qty=signed_qty, reason=adjustment.reason, origin_user=user, at=datetime.now(timezone.utc), unit_cost=product.avg_cost,
@@ -509,7 +551,8 @@ async def approve_adjustment(user: User, adjustment_id: str) -> Adjustment:
     adjustment.status = "approved"
     adjustment.decided_by = user
     await adjustment.save()
-    await _tell_submitter(adjustment.submitted_by_id, "adjustment.approved", f"Your {adjustment.reason} adjustment was approved by {user.name}",
+    label = (entry.name if entry else adjustment.reason).lower()
+    await _tell_submitter(adjustment.submitted_by_id, "adjustment.approved", f"Your {label} adjustment was approved by {user.name}",
                           None, "/inventory/adjustments", "good")
     await OutboxEvent.create(
         aggregate_type="Adjustment", aggregate_id=str(adjustment.id),
@@ -529,7 +572,11 @@ async def reject_adjustment(user: User, adjustment_id: str) -> Adjustment:
     adjustment.status = "rejected"
     adjustment.decided_by = user
     await adjustment.save()
-    await _tell_submitter(adjustment.submitted_by_id, "adjustment.rejected", f"Your {adjustment.reason} adjustment was rejected by {user.name}",
+    from app.models import ListEntry
+
+    entry = await ListEntry.get_or_none(kind="adjustment", code=adjustment.reason)
+    label = (entry.name if entry else adjustment.reason).lower()
+    await _tell_submitter(adjustment.submitted_by_id, "adjustment.rejected", f"Your {label} adjustment was rejected by {user.name}",
                           "Nothing changed in stock. Talk to them if it was right.", "/inventory/adjustments", "bad")
     await OutboxEvent.create(
         aggregate_type="Adjustment", aggregate_id=str(adjustment.id),

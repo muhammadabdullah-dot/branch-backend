@@ -105,7 +105,7 @@ async def update(user: User, po_id: str, data: PurchaseOrderUpdate) -> PurchaseO
     if str(po.created_by_id) != str(user.id):
         await po.fetch_related("created_by")
         raise PurchaseOrderError(
-            f"{po.po_number} was raised by {po.created_by.name}. Only they can change the draft — or cancel it and raise your own."
+            f"{po.po_number} was raised by {po.created_by.name}. Only they can change the draft, or you can cancel it and raise your own."
         )
     changes = data.model_dump(exclude_unset=True)
     supplier_id = changes.get("supplierId") or po.supplier_id

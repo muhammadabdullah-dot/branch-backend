@@ -25,6 +25,9 @@ from app.routes.inventory import router as inventory_router
 from app.routes.exports import router as exports_router
 from app.routes.locations import router as locations_router
 from app.routes.maintenance import router as maintenance_router
+from app.routes.masters import router as masters_router
+from app.routes.requisitions import router as stock_requests_router
+from app.routes.transfers import router as transfers_router
 from app.routes.members import router as members_router
 from app.routes.purchase_orders import router as purchase_orders_router
 from app.routes.reports import router as reports_router
@@ -85,11 +88,17 @@ app.include_router(locations_router)
 app.include_router(purchase_orders_router)
 app.include_router(reports_router)
 app.include_router(inventory_router)
+app.include_router(stock_requests_router)
+app.include_router(transfers_router)
 app.include_router(catalog_router)
 app.include_router(suppliers_router)
 app.include_router(members_router)
+app.include_router(masters_router)
 app.include_router(alerts_router)
 app.include_router(accounts_router)
+from app.routes import fixed_assets, tax_reports  # noqa: E402
+app.include_router(fixed_assets.router)
+app.include_router(tax_reports.router)
 app.include_router(maintenance_router)
 app.include_router(client_errors_router)
 
@@ -104,6 +113,11 @@ async def _seed() -> None:
     if revised:
         print(f"  staff: {revised} account(s) moved onto per-person access", flush=True)
     await sync_role_labels()
+    from app.services.seed_service import split_the_books_access
+
+    split = await split_the_books_access()
+    if split:
+        print(f"  accounts: {split} account(s) moved onto a tick per accounts screen and area", flush=True)
     await sync_role_resource_grants()
     await link_named_vouchers()
     from app.services import counter_service
@@ -176,7 +190,7 @@ async def _print_banner() -> None:
     if FRONTEND_DIST is not None:
         found = (FRONTEND_DIST / "index.html").is_file()
         print(
-            f"  App:     {'served from ' + str(FRONTEND_DIST) if found else 'not built yet — run npm run build in branch-app'}\n",
+            f"  App:     {'served from ' + str(FRONTEND_DIST) if found else 'not built yet, so run npm run build in branch-app'}\n",
             flush=True,
         )
 

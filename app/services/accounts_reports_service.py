@@ -96,13 +96,22 @@ def _split(value: Decimal) -> tuple[str, str]:
     return (_s(value), "0.00") if value >= 0 else ("0.00", _s(-value))
 
 
-async def trial_balance(start: date | None, end: date, group_code: str | None = None, include_zero: bool = False) -> dict:
+def codes(value: str | None) -> set[str]:
+    """A filter that names one group or category, or several separated by commas ("1102,1103")."""
+    return {c.strip() for c in (value or "").split(",") if c.strip()}
+
+
+async def trial_balance(start: date | None, end: date, group_code: str | None = None, include_zero: bool = False,
+                        category_code: str | None = None) -> dict:
     chart = await chart_map()
     opening = await _sums(before=start) if start else {}
     period = await _sums(start=start, end=end)
+    groups_wanted, categories_wanted = codes(group_code), codes(category_code)
     rows = []
     for account_id, meta in chart.items():
-        if group_code and meta["groupCode"] != group_code:
+        if groups_wanted and meta["groupCode"] not in groups_wanted:
+            continue
+        if categories_wanted and meta["categoryCode"] not in categories_wanted:
             continue
         o_dr, o_cr = opening.get(account_id, (ZERO, ZERO))
         p_dr, p_cr = period.get(account_id, (ZERO, ZERO))
@@ -180,14 +189,16 @@ async def ledger(account_id: str, start: date | None, end: date, include_pdc: bo
         debit, credit = money(_d(r["debit"])), money(_d(r["credit"]))
         running += debit - credit
         own_side_debit = debit > 0
-        contra = [chart.get(a, {}).get("name", "?") for a, d, c in others.get(str(r["voucher_id"]), [])
-                  if a != str(account_id) and ((c > 0) if own_side_debit else (d > 0))]
+        contra_ids = list(dict.fromkeys(a for a, d, c in others.get(str(r["voucher_id"]), [])
+                                        if a != str(account_id) and ((c > 0) if own_side_debit else (d > 0))))
+        contra = [chart.get(a, {}).get("name", "?") for a in contra_ids]
         description = r["description"] if r["description"] and r["description"] != "__header__" else r["vdesc"]
         entries.append({
             "voucherId": str(r["voucher_id"]), "number": r["number"], "vtype": r["vtype"], "date": str(r["date"])[:10],
             "description": description, "referenceNo": r["reference_no"] or r["vref"], "chequeNo": r["cheque_no"],
             "auto": bool(r["auto"]), "debit": _s(debit), "credit": _s(credit), "balance": _s(running),
-            "against": ", ".join(dict.fromkeys(contra))[:200] if contra else None,
+            "against": ", ".join(contra)[:200] if contra else None,
+            "againstAccounts": [{"accountId": a, "name": chart.get(a, {}).get("name", "?")} for a in contra_ids[:8]],
         })
     pdc = []
     if include_pdc:
@@ -233,11 +244,14 @@ async def income_statement(start: date, end: date) -> dict:
         for prefix, field in (("sales.dept.", "sales"), ("cogs.dept.", "cost")):
             if system_key.startswith(prefix):
                 slug = system_key[len(prefix):]
-                dept = departments.setdefault(slug, {"name": meta["name"].split(" - ", 1)[-1], "sales": ZERO, "cost": ZERO})
+                dept = departments.setdefault(slug, _department(meta["name"].split(" - ", 1)[-1]))
                 dept[field] += amount
+                dept[f"{field}AccountId"] = account_id
         if system_key in ("sales.general", "cogs.general"):
-            dept = departments.setdefault("", {"name": "GENERAL", "sales": ZERO, "cost": ZERO})
-            dept["sales" if system_key == "sales.general" else "cost"] += amount
+            dept = departments.setdefault("", _department("GENERAL"))
+            field = "sales" if system_key == "sales.general" else "cost"
+            dept[field] += amount
+            dept[f"{field}AccountId"] = account_id
     net_sales = sections["sales"]["amount"]
     cost = sections["cost"]["amount"]
     gross = net_sales - cost
@@ -256,9 +270,19 @@ async def income_statement(start: date, end: date) -> dict:
         "otherIncome": _s(sections["other"]["amount"]),
         "operatingExpenses": _s(sections["operating"]["amount"]), "financialExpenses": _s(sections["financial"]["amount"]),
         "netProfit": _s(net), "netMargin": _s(net / net_sales * 100) if net_sales else "0.00",
-        "departments": [{"name": d["name"], "sales": _s(d["sales"]), "cost": _s(d["cost"]), "gross": _s(d["sales"] - d["cost"])}
+        "departments": [{"name": d["name"], "sales": _s(d["sales"]), "cost": _s(d["cost"]), "gross": _s(d["sales"] - d["cost"]),
+                         "salesAccountId": d["salesAccountId"], "costAccountId": d["costAccountId"]}
                         for d in sorted(departments.values(), key=lambda d: -d["sales"])],
     }
+
+
+def _department(name: str) -> dict:
+    return {"name": name, "sales": ZERO, "cost": ZERO, "salesAccountId": None, "costAccountId": None}
+
+
+async def first_posted_day() -> date | None:
+    row = await Voucher.filter(status="posted").order_by("date").first()
+    return row.date if row else None
 
 
 def fiscal_year_start(day: date, start_month: int) -> date:
@@ -331,6 +355,9 @@ async def balance_sheet(as_of: date, fiscal_start_month: int) -> dict:
         "totalAssets": _s(assets), "totalLiabilitiesAndEquity": _s(liabilities + equity["amount"]),
         "difference": _s(assets - liabilities - equity["amount"]),
         "currentYearProfit": _s(current), "profitBroughtForward": _s(brought_forward),
+        # What the two profit lines add up, so each opens the income statement for its own days.
+        "broughtForwardFrom": (first.isoformat() if (first := await first_posted_day()) and first < fy_start else None),
+        "broughtForwardTo": (fy_start - timedelta(days=1)).isoformat(),
     }
 
 
@@ -359,13 +386,13 @@ async def day_book(start: date, end: date, vtype: str | None, limit: int, offset
 BUCKETS = (("current", 0, 30), ("d31_60", 31, 60), ("d61_90", 61, 90), ("d91_120", 91, 120), ("over120", 121, 10 ** 6))
 
 
-async def ageing(kind: str, as_of: date) -> dict:
+async def ageing(kind: str, as_of: date, account_ids: list[str] | None = None) -> dict:
     """What each customer owes (or each supplier is owed), split by how old it is. Payments settle the oldest first."""
     from app.models import Party, Supplier
 
     if kind not in ("customer", "supplier"):
         raise ValueError("Ageing is for customers or suppliers.")
-    accounts = await Account.filter(kind=kind)
+    accounts = await (Account.filter(kind=kind, id__in=account_ids) if account_ids is not None else Account.filter(kind=kind))
     if not accounts:
         return {"asOf": as_of.isoformat(), "kind": kind, "rows": [], "totals": {}}
     ids = [str(a.id) for a in accounts]
@@ -436,6 +463,35 @@ async def ageing(kind: str, as_of: date) -> dict:
     return {"asOf": as_of.isoformat(), "kind": kind, "rows": rows, "totals": {k: _s(v) for k, v in totals.items()}}
 
 
+# ── statement of account ───────────────────────────────────────────────────────────────────────
+
+async def statement(account_id: str, start: date | None, end: date) -> dict:
+    """What a customer or supplier is sent: who they are, what they owed at the start, every entry with the balance after
+    it, what they owe at the end and how old it is. The same figures as the ledger, read from their side."""
+    from app.models import Party, Supplier
+
+    account = await Account.get_or_none(id=account_id)
+    if not account:
+        raise ValueError("That account doesn't exist.")
+    if account.kind not in ("customer", "supplier"):
+        raise ValueError("A statement of account is for a customer or a supplier.")
+    book = await ledger(account_id, start, end)
+    party = None
+    if account.party_ref:
+        party = await (Party if account.kind == "customer" else Supplier).get_or_none(id=account.party_ref)
+    address = ", ".join(p for p in (getattr(party, "address", None), getattr(party, "city", None)) if p)
+    ages = await ageing(account.kind, end, [str(account.id)])
+    return {
+        **book,
+        "kind": account.kind,
+        "party": {"name": account.name, "code": getattr(party, "code", None) or account.code, "phone": getattr(party, "phone", None),
+                  "address": address or None, "ntn": getattr(party, "ntn", None), "dueDays": getattr(party, "due_days", None)},
+        # Customers read debit as what they owe; suppliers read credit as what the branch owes them.
+        "owedSide": "debit" if account.kind == "customer" else "credit",
+        "ageing": ages["rows"][0] if ages["rows"] else None,
+    }
+
+
 # ── the accounts desk ──────────────────────────────────────────────────────────────────────────
 
 async def dashboard() -> dict:
@@ -490,7 +546,10 @@ async def dashboard() -> dict:
             "stockInBooks": _s(stock_gl), "stockInTransit": _s(transit_gl), "stockReportAtCost": _s(stock_report),
             "stockDifference": _s(stock_gl - stock_report),
             "customerBalancesOff": mismatched[:20], "customerBalancesOffCount": len(mismatched),
+            "stockAccountId": by_key.get("stock.main"), "transitAccountId": by_key.get("stock.transit"),
+            "interofficeAccountIds": [k for k, m in chart.items() if m["kind"] == "interoffice"],
         },
+        "problemSources": [await vouchers_service.problem_source(p) for p in (settings.posting_problems or [])[:20]],
         "drafts": await Voucher.filter(status="draft").count(),
         "pendingCheques": len(pending), "pendingChequesAmount": _s(sum((Decimal(c.amount) for c in pending), ZERO)),
         "chequesDue": sum(1 for c in pending if c.cheque_date <= today),

@@ -130,6 +130,18 @@ class SaleRecordOut(BaseModel):
     fbrInvoiceNumber: str
 
 
+class ReceiptReprintOut(BaseModel):
+    """A bill made earlier, ready to print again, marked as a reprint."""
+    sale: SaleRecordOut
+    # Who rang it and on which till, as the first print said.
+    cashierName: str | None = None
+    tillLabel: str | None = None
+    reprintedAt: datetime
+    reprintedBy: str
+    # 1 for the first reprint of this bill, 2 for the second…
+    copyNumber: int
+
+
 class ReturnLineIn(BaseModel):
     productId: str
     qty: Decimal
@@ -144,6 +156,8 @@ class ReturnCreateRequest(BaseModel):
     # back off the balance, everything else as cash.
     refundMethod: str | None = None
     refundReference: str | None = None
+    # Why it came back: a code from the branch's customer return reasons. Optional.
+    reason: str | None = Field(default=None, max_length=40)
 
 
 class ReturnQuoteRequest(BaseModel):
@@ -159,6 +173,8 @@ class ReturnRecordOut(BaseModel):
     refundTotal: Money
     refundMethod: str = "CASH"
     taxTotal: Money | None = None
+    reason: str | None = None
+    reasonLabel: str | None = None
 
 
 class PaymentProofOut(BaseModel):

@@ -406,3 +406,64 @@ async def give_managers_the_counter_board() -> int:
     await Counter.create(id="rollout:counter-board", value=1)
     return changed
 
+
+
+async def split_the_books_access() -> int:
+    """Once: the six accounts ticks there were become a tick per screen and action, and per area of accounts, for every
+    person and every role's standard access (core/abilities.py LEGACY_ACCOUNTS says what each old tick stands for), so
+    nobody gains or loses anything. "See the books" itself goes. Reports brings the two new report screens.
+
+    Runs before the startup backfill, and counts the new names as already handed out to each role, so the backfill
+    doesn't give a whole set of accounts ticks to someone whose access was deliberately narrower."""
+    from app.core.abilities import LEGACY_ACCOUNTS, RETIRED_RESOURCES, translate_legacy
+    from app.models import Counter
+    from app.services import staff_sync_service
+
+    if await Counter.exists(id="rollout:accounts-split"):
+        return 0
+    fields = {"R": "can_read", "W": "can_write", "X": "can_execute"}
+
+    def held(rows) -> dict[str, set[str]]:
+        return {row.resource: {a for a, f in fields.items() if getattr(row, f)} for row in rows}
+
+    async def rewrite(rows, make) -> bool:
+        before = held(rows)
+        after = translate_legacy(before)
+        by_resource = {row.resource: row for row in rows}
+        touched = False
+        for resource, actions in after.items():
+            row = by_resource.get(resource)
+            if row is None:
+                await make(resource, actions)
+                touched = True
+            elif before.get(resource, set()) != actions:
+                for action, field in fields.items():
+                    setattr(row, field, action in actions)
+                await row.save()
+                touched = True
+        for resource in RETIRED_RESOURCES:
+            if resource in by_resource:
+                await by_resource[resource].delete()
+                touched = True
+        return touched
+
+    changed = 0
+    for user in await User.all():
+        async def make_user_row(resource, actions, user=user):
+            await UserPermission.create(user=user, resource=resource, can_read="R" in actions, can_write="W" in actions,
+                                        can_execute="X" in actions, granted_by=None)
+        if await rewrite(await UserPermission.filter(user=user), make_user_row):
+            changed += 1
+            await staff_sync_service.emit(user.id, None)
+
+    new_names = {target for targets in LEGACY_ACCOUNTS.values() for target, _ in targets}
+    for role in await Role.all():
+        async def make_role_row(resource, actions, role=role):
+            await RoleDefaultPermission.create(role=role, resource=resource, can_read="R" in actions, can_write="W" in actions,
+                                               can_execute="X" in actions)
+        await rewrite(await RoleDefaultPermission.filter(role=role), make_role_row)
+        if role.rolled_out_resources is not None:
+            role.rolled_out_resources = sorted((set(role.rolled_out_resources) - RETIRED_RESOURCES) | (resources_for_role(role.id) & new_names))
+            await role.save(update_fields=["rolled_out_resources"])
+    await Counter.create(id="rollout:accounts-split", value=1)
+    return changed

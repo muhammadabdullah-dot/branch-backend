@@ -23,10 +23,34 @@ async def get_current_user(authorization: str | None = Header(default=None)) -> 
     return user
 
 
+def access_name(resource: str, action: str) -> str | None:
+    """What the access is called on Staff & Roles, so a refusal says what to ask for rather than naming a resource.
+    Seeing something comes with changing it, so a refused read can name the tick that brings it."""
+    from app.core.abilities import ABILITIES
+
+    exact = next((label for _, r, a, label, _ in ABILITIES if r == resource and a == action), None)
+    if exact or action != "R":
+        return exact
+    return next((label for _, r, _a, label, _ in ABILITIES if r == resource), None)
+
+
+def refusal(pairs: list[tuple[str, str]]) -> str:
+    from app.core.abilities import MANAGER_ONLY_RESOURCES
+
+    if all(resource in MANAGER_ONLY_RESOURCES for resource, _ in pairs):
+        return "Only a Branch Manager account can do this."
+    names = list(dict.fromkeys(name for name in (access_name(r, a) for r, a in pairs) if name))
+    if not names:
+        return "You don't have access to this. Ask your Branch Manager."
+    if len(names) == 1:
+        return f"This needs {names[0]}. Ask your Branch Manager for it."
+    return f"This needs one of: {', '.join(names[:4])}. Ask your Branch Manager."
+
+
 def require_permission(resource: str, action: str):
     async def checker(user: User = Depends(get_current_user)) -> User:
         if not await has_permission(user, resource, action):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, f"Missing '{action}' on '{resource}'")
+            raise HTTPException(status.HTTP_403_FORBIDDEN, refusal([(resource, action)]))
         return user
 
     return checker
@@ -48,7 +72,6 @@ def require_any_permission(*pairs: tuple[str, str]):
         for resource, action in pairs:
             if await has_permission(user, resource, action):
                 return user
-        wanted = ", ".join(f"{a} on {r}" for r, a in pairs)
-        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Missing any of: {wanted}")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, refusal(list(pairs)))
 
     return checker

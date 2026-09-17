@@ -25,6 +25,7 @@ def _fields(p: Product, include_aliases: bool = False) -> dict:
         aliases=[_alias_out(a) for a in p.aliases] if include_aliases else [],
         discPercent=p.disc_percent, discFlat=p.disc_flat, lockDisc=p.lock_disc, variant=p.variant,
         origin=p.origin, remarks=p.remarks, hasPicture=bool(p.picture), parentId=p.parent_id, parentQty=p.parent_qty,
+        wholesalePrice=p.wholesale_price, reorderLevel=p.reorder_level,
     )
 
 

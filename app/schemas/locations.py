@@ -19,6 +19,8 @@ class LocationOut(BaseModel):
     # switched off while it still holds anything.
     itemsHeld: int = 0
     unitsHeld: Qty = 0
+    # The location Billing takes stock from and customer returns go back to. It can't be switched off.
+    sellsFrom: bool = False
 
 
 class LocationCreate(BaseModel):

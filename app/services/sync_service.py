@@ -402,7 +402,7 @@ async def _drain(identity: BranchIdentity, result: SyncResult) -> None:
             if response.status_code == 401:
                 result.error = (
                     "Head office no longer recognises this branch's credentials. Its pairing may "
-                    "have been revoked — nothing has been sent."
+                    "have been revoked. Nothing has been sent."
                 )
                 await _mark_failed(events, result.error)
                 return
@@ -449,7 +449,7 @@ async def _drain(identity: BranchIdentity, result: SyncResult) -> None:
                     await event.save(update_fields=["status", "last_error"])
                 if set_aside:
                     logs.log.warning(
-                        "sync: %s event(s) head office would not store, set aside after %s refusals (first: %s %s — %s)",
+                        "sync: %s event(s) head office would not store, set aside after %s refusals (first: %s %s, event %s)",
                         len(set_aside), MAX_REFUSALS_PER_EVENT,
                         set_aside[0].aggregate_type, set_aside[0].aggregate_id, set_aside[0].id,
                     )

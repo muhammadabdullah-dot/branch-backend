@@ -156,6 +156,8 @@ class PurchaseReturnOut(BaseModel):
     locationId: str
     grnId: str | None = None
     reason: str
+    # What the reason is called on the branch's list today.
+    reasonLabel: str | None = None
     notes: str | None = None
     submittedByUserId: str
     at: datetime
@@ -222,6 +224,9 @@ class AdjustmentOut(BaseModel):
     productSku: str | None = None
     locationId: str
     reason: str
+    reasonLabel: str | None = None
+    # Whether approving it adds stock (a "found" kind of reason) or takes it off.
+    adds: bool = False
     magnitude: Qty
     notes: str | None = None
     status: str

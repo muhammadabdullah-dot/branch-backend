@@ -50,7 +50,7 @@ class BranchIdentity(models.Model):
         table = "branch_identity"
 
     def __str__(self) -> str:
-        return f"{self.code} — {self.name}"
+        return f"{self.code}: {self.name}"
 
 
 class SyncState(models.Model):

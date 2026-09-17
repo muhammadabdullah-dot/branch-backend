@@ -76,7 +76,36 @@ async def price_changes(
     return await catalog_controller.price_changes(from_, to)
 
 
-# Paths with an id come last, so /lookup, /facets and /price-changes are never read as an id.
+# The screens that flag low stock (dashboard alerts, Stock Overview) work from the stock ledger, not the catalog, so
+# they read the levels on their own: only Items that have one, plus the usual level for the rest.
+_levels_read = require_any_permission(
+    ("inventory.overview", "R"), ("inventory.catalog", "R"), ("reports", "R"), ("branch-console.dashboard", "R"),
+)
+
+
+@router.get("/reorder-levels")
+async def reorder_levels(user: User = Depends(_levels_read)) -> dict:
+    """{usualLevel, levels: {productId: level}}. Low stock is fewer than the Item's level, else fewer than the usual one."""
+    from app.models import Product
+    from app.services import masters_service
+
+    rows = await Product.filter(reorder_level__isnull=False).values_list("id", "reorder_level")
+    usual = await masters_service.low_stock_level()
+    return {"usualLevel": format(usual.normalize(), "f"), "levels": {pid: format(level.normalize(), "f") for pid, level in rows}}
+
+
+@router.get("/on-hand")
+async def on_hand(ids: str = Query(..., max_length=20000), user: User = Depends(_read)) -> dict[str, str]:
+    """{productId: what the branch holds across its switched-on locations}. Billing asks before adding to a line, because
+    stock never goes below zero: what isn't here can't be sold."""
+    from app.services import stock_guard
+
+    wanted = [i for i in dict.fromkeys(x.strip() for x in ids.split(",")) if i][:500]
+    held = await stock_guard.on_hand(wanted)
+    return {pid: stock_guard.qty_text(qty) for pid, qty in held.items()}
+
+
+# Paths with an id come last, so /lookup, /facets, /price-changes and /reorder-levels and /on-hand are never read as an id.
 @router.get("/{product_id}", response_model=ProductDetailOut)
 async def detail(product_id: str, user: User = Depends(_read)) -> ProductDetailOut:
     return await catalog_controller.detail(product_id)

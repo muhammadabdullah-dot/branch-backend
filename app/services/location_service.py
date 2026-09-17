@@ -8,6 +8,10 @@ from app.models import Adjustment, Location, PhysicalCount
 from app.schemas.locations import LocationCreate, LocationUpdate
 
 
+# Billing takes stock from here and customer returns put it back here (sales_service, returns_service).
+SALES_LOCATION_ID = "loc-1"
+
+
 class LocationError(Exception):
     def __init__(self, message: str):
         self.message = message
@@ -82,6 +86,10 @@ async def _refuse_deactivation(location: Location) -> None:
     """Switching a location off hides it from every picker. That's only safe once nothing is left
     there — otherwise the stock would still count in the branch's totals but nobody could count,
     adjust or move it, because the place it sits no longer appears anywhere."""
+    if location.id == SALES_LOCATION_ID:
+        raise LocationError(
+            f"{location.name} is where the counter sells from and returns go back to, so it stays switched on. Rename it if the name no longer fits."
+        )
     items, units = (await holdings()).get(location.id, (0, Decimal("0")))
     if items:
         raise LocationError(

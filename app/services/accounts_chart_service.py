@@ -373,20 +373,36 @@ async def ensure_party_accounts() -> int:
 
 # ── reading and changing the chart ─────────────────────────────────────────────────────────────
 
-async def tree() -> dict:
+async def tree(access=None) -> dict:
+    """The chart, limited to what `access` (accounts_areas.Access) may see. Each account says its area and whether
+    the person may put it on a voucher line."""
+    from app.services import accounts_areas
+
+    access = access or accounts_areas.EVERYTHING
     types = await AccountType.all().order_by("code")
     categories = await AccountCategory.all().order_by("code")
     groups = await AccountGroup.all().order_by("code")
     subs = await AccountSubGroup.all().order_by("code")
     accounts = await Account.all().order_by("code")
     used = {str(a) for a in await VoucherLine.all().distinct().values_list("account_id", flat=True)}
+    category_of = {g.code: g.category_id for g in groups}
+    area = {str(a.id): accounts_areas.area_of(a.kind, a.group_id, category_of.get(a.group_id), a.system_key) for a in accounts}
+    if not access.sees_everything:
+        accounts = [a for a in accounts if access.can_see(area[str(a.id)], a.system_key)]
+        # A group shows when its own area is seen, or when it holds an account that is (a bank account under advances).
+        shown = {a.group_id for a in accounts} | {g.code for g in groups if access.can_see(accounts_areas.area_of(None, g.code, g.category_id))}
+        groups = [g for g in groups if g.code in shown]
+        subs = [s for s in subs if s.group_id in shown]
+        categories = [c for c in categories if c.code in {g.category_id for g in groups}]
+        types = [t for t in types if t.code in {c.type_id for c in categories}]
     return {
         "types": [{"code": t.code, "name": t.name, "nature": t.nature, "statement": t.statement} for t in types],
         "categories": [{"code": c.code, "name": c.name, "typeCode": c.type_id} for c in categories],
         "groups": [{**group_payload(g)} for g in groups],
         "subGroups": [{"code": s.code, "name": s.name, "groupCode": s.group_id, "standard": s.standard} for s in subs],
         "accounts": [{**(await account_payload(a)), "checkLimit": a.check_limit, "balanceLimit": a.balance_limit,
-                      "manualCode": a.manual_code, "remarks": a.remarks, "used": str(a.id) in used} for a in accounts],
+                      "manualCode": a.manual_code, "remarks": a.remarks, "used": str(a.id) in used,
+                      "area": area[str(a.id)], "canUse": access.can_use(area[str(a.id)], a.system_key)} for a in accounts],
     }
 
 
@@ -456,6 +472,43 @@ async def update_sub_group(code: str, name: str) -> AccountSubGroup:
     await sub.save()
     await emit_sub_group(sub)
     return sub
+
+
+def _is_default_sub_group(sub: AccountSubGroup) -> bool:
+    # Every group's first sub group is where its accounts land when nobody picks one.
+    return sub.code == f"{sub.group_id}01"
+
+
+@atomic()
+async def delete_group(code: str) -> None:
+    """Only a group somebody added, and only while nothing is in it."""
+    group = await AccountGroup.get_or_none(code=code)
+    if not group:
+        raise ChartError("That group doesn't exist.")
+    if group.standard:
+        raise ChartError(f"{group.name} is part of the standard chart every branch and head office share, so it stays.")
+    held = await Account.filter(group_id=code).count()
+    if held:
+        raise ChartError(f"{group.name} still holds {held} account{'s' if held != 1 else ''}. Move or delete them first.")
+    for sub in await AccountSubGroup.filter(group_id=code):
+        await _emit("subGroupDeleted", sub.code, {"code": sub.code, "groupCode": code})
+        await sub.delete()
+    await _emit("groupDeleted", code, {"code": code})
+    await group.delete()
+
+
+@atomic()
+async def delete_sub_group(code: str) -> None:
+    sub = await AccountSubGroup.get_or_none(code=code)
+    if not sub:
+        raise ChartError("That sub group doesn't exist.")
+    if sub.standard or _is_default_sub_group(sub):
+        raise ChartError("A group's first sub group holds the accounts nobody put elsewhere, so it stays.")
+    held = await Account.filter(sub_group_id=code).count()
+    if held:
+        raise ChartError(f"{sub.name} still holds {held} account{'s' if held != 1 else ''}. Move them to another sub group first.")
+    await _emit("subGroupDeleted", code, {"code": code, "groupCode": sub.group_id})
+    await sub.delete()
 
 
 ACCOUNT_FIELDS = ("name", "sub_group_id", "kind", "active", "restricted", "check_limit", "balance_limit", "bank_name", "bank_account_no", "manual_code", "remarks")

@@ -2,7 +2,7 @@ from fastapi import HTTPException, status
 
 from app.models import User
 from app.schemas.sales import ReturnCreateRequest, ReturnQuoteRequest, ReturnRecordOut
-from app.services import returns_service
+from app.services import masters_service, returns_service
 from app.schemas.types import money_str
 
 
@@ -11,10 +11,12 @@ async def create(user: User, payload: ReturnCreateRequest) -> ReturnRecordOut:
         record = await returns_service.create_return(user, payload)
     except returns_service.ReturnError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
+    reasons = await masters_service.reason_entries("sale-return") if record.reason else {}
     return ReturnRecordOut(
         id=str(record.id), against=record.against.invoice_number, at=record.at,
         cashierId=str(record.cashier_id), refundTotal=record.refund_total, refundMethod=record.refund_method,
-        taxTotal=record.tax_total,
+        taxTotal=record.tax_total, reason=record.reason,
+        reasonLabel=reasons[record.reason].name if record.reason in reasons else record.reason,
     )
 
 

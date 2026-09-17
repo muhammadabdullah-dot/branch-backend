@@ -56,12 +56,12 @@ async def issue(
     else:
         approver = requester
         if not await has_permission(approver, OVERRIDE_RESOURCE, "X"):
-            raise ApprovalError("You can't approve discounts — someone who can needs to sign in and approve this", status=403)
+            raise ApprovalError("You can't approve discounts. Someone who can needs to sign in and approve this", status=403)
     # Nobody approves more discount than they may give themselves.
     limit = discount_limit_of(approver)
     if max_percent > limit + PERCENT_TOLERANCE:
         raise ApprovalError(
-            f"{approver.name} can approve discounts up to {limit.normalize():f}% — this bill needs {max_percent:.1f}%.", status=403,
+            f"{approver.name} can approve discounts up to {limit.normalize():f}%, but this bill needs {max_percent:.1f}%.", status=403,
         )
     return grant(approver, requester, bill_id, max_percent)
 
@@ -91,31 +91,31 @@ async def verify(token: str, cashier: User, bill_id: str | None, effective_pct: 
     try:
         claims = decode_discount_approval_token(token)
     except jwt.ExpiredSignatureError:
-        raise ApprovalError("The manager's approval for this discount has expired — ask them to approve it again")
+        raise ApprovalError("The manager's approval for this discount has expired. Ask them to approve it again")
     except jwt.PyJWTError:
-        raise ApprovalError("This discount approval isn't valid — ask a manager to approve it again")
+        raise ApprovalError("This discount approval isn't valid. Ask a manager to approve it again")
     try:
         approver_id = str(claims["approver"])
         requester_id = str(claims["requester"])
         approved_bill = str(claims["bill"])
         max_pct = Decimal(str(claims["maxPct"]))
     except (KeyError, InvalidOperation):
-        raise ApprovalError("This discount approval isn't valid — ask a manager to approve it again")
+        raise ApprovalError("This discount approval isn't valid. Ask a manager to approve it again")
 
     if requester_id != str(cashier.id):
-        raise ApprovalError("This discount was approved for another salesperson — ask a manager to approve it for you")
+        raise ApprovalError("This discount was approved for another salesperson. Ask a manager to approve it for you")
     # The bill is its idempotency key, which only one sale can ever commit under — so an approval
     # covers one sale, not every bill rung up in the next fifteen minutes.
     if not bill_id or approved_bill != bill_id:
-        raise ApprovalError("This discount was approved for a different bill — ask a manager to approve this one")
+        raise ApprovalError("This discount was approved for a different bill. Ask a manager to approve this one")
     if effective_pct > max_pct + PERCENT_TOLERANCE:
         raise ApprovalError(
-            f"Discount {effective_pct:.2f}% is more than the {max_pct:.2f}% the manager approved — ask them to approve it again"
+            f"Discount {effective_pct:.2f}% is more than the {max_pct:.2f}% the manager approved, so ask them to approve it again"
         )
 
     approver = await User.get_or_none(id=approver_id, active=True).prefetch_related("role")
     if not approver or not await has_permission(approver, OVERRIDE_RESOURCE, "X"):
-        raise ApprovalError("The person who approved this discount can't approve discounts any more — ask again")
+        raise ApprovalError("The person who approved this discount can't approve discounts any more. Ask again")
     if effective_pct > discount_limit_of(approver) + PERCENT_TOLERANCE:
-        raise ApprovalError(f"{approver.name} can approve discounts up to {discount_limit_of(approver).normalize():f}% — ask someone with a higher limit")
+        raise ApprovalError(f"{approver.name} can approve discounts up to {discount_limit_of(approver).normalize():f}%, so ask someone with a higher limit")
     return approver
