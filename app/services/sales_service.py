@@ -354,9 +354,8 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
             raise SaleError(exc.message, status=403) from exc
         refused = pharmacy_service.over_pass(payload.lines, products, pharmacy_departments, allowed)
         if refused:
-            raise SaleError(
-                f"Only pharmacy staff can sell {refused}. Ask them to ring it up, or take it off this bill.", status=403,
-            )
+            # Why these Items can't go on this bill is not for this person to know: the till says only that they can't.
+            raise SaleError(f"{refused} can't be sold on this bill. Take it off and try again.", status=403)
 
     # Empty means empty: every Item on the bill must be in stock for its whole quantity. What this same bill takes back
     # (an exchange) is back on the shelf first, so it counts.
