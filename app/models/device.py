@@ -10,6 +10,12 @@ class Device(models.Model):
     name = fields.CharField(max_length=120, null=True)
     first_seen_at = fields.DatetimeField(auto_now_add=True)
     last_seen_at = fields.DatetimeField(auto_now=True)
+    # Set when a Branch Manager registers this browser by name ("Counter 1 PC") from the device itself.
+    # Only a registered device can be assigned to counter staff; every other one is simply seen.
+    registered_at = fields.DatetimeField(null=True)
+    registered_by: fields.ForeignKeyNullableRelation["User"] = fields.ForeignKeyField(
+        "models.User", related_name="devices_registered", null=True, on_delete=fields.SET_NULL
+    )
 
     class Meta:
         table = "devices"

@@ -6,7 +6,7 @@ the till signed the manager in on its own screen and sent only their id. Any sal
 manager's id could post a sale with whatever discount they liked, no password involved.
 
 An approval is now something this server issues and signs, after it has checked the manager's
-password — or, for a salesperson who holds the authority themselves, their own session. The signed
+password: or, for a salesperson who holds the authority themselves, their own session. The signed
 approval names who approved, the most total discount they approved, the salesperson who asked, and
 the one bill it is for. POST /sales accepts nothing less, and records the approver it names.
 """
@@ -22,6 +22,8 @@ from app.services import auth_service
 from app.services.rbac_service import discount_limit_of, has_permission
 
 OVERRIDE_RESOURCE = "store.discount-override"
+# Every percent here is a share of the bill's margin (what it sells for less what its Items cost the shop, tax included),
+# never of its price: see services/sale_rules.py. However high the approval, no bill sells below that cost.
 # Floating-point slack between the percent the till solved for and the one the server recomputes from
 # it. A ten-thousandth of a percentage point is one rupee on a million-rupee bill.
 PERCENT_TOLERANCE = Decimal("0.0001")
@@ -61,13 +63,13 @@ async def issue(
     limit = discount_limit_of(approver)
     if max_percent > limit + PERCENT_TOLERANCE:
         raise ApprovalError(
-            f"{approver.name} can approve discounts up to {limit.normalize():f}%, but this bill needs {max_percent:.1f}%.", status=403,
+            f"{approver.name} can approve discounts up to {limit.normalize():f}% of a bill's profit, but this bill needs {max_percent:.1f}%.", status=403,
         )
     return grant(approver, requester, bill_id, max_percent)
 
 
 def grant(approver: User, requester: User, bill_id: str, max_percent: Decimal) -> Approval:
-    """Signs the approval without checking anyone's password or authority — `issue` does that first.
+    """Signs the approval without checking anyone's password or authority: `issue` does that first.
     Only for server-side callers that already know who approved (the demo-data script); verify()
     still checks the approver's authority when the sale lands."""
     # Whole seconds, so the expiry reported back matches the one inside the token.
@@ -86,7 +88,7 @@ def grant(approver: User, requester: User, bill_id: str, max_percent: Decimal) -
 
 async def verify(token: str, cashier: User, bill_id: str | None, effective_pct: Decimal) -> User:
     """The approver, once the approval is proven to be this server's, unexpired, and for this
-    salesperson, this bill and at least this much discount. Their authority is checked again here —
+    salesperson, this bill and at least this much discount. Their authority is checked again here:
     a manager whose authority was withdrawn after approving no longer approves anything."""
     try:
         claims = decode_discount_approval_token(token)
@@ -104,18 +106,18 @@ async def verify(token: str, cashier: User, bill_id: str | None, effective_pct: 
 
     if requester_id != str(cashier.id):
         raise ApprovalError("This discount was approved for another salesperson. Ask a manager to approve it for you")
-    # The bill is its idempotency key, which only one sale can ever commit under — so an approval
+    # The bill is its idempotency key, which only one sale can ever commit under: so an approval
     # covers one sale, not every bill rung up in the next fifteen minutes.
     if not bill_id or approved_bill != bill_id:
         raise ApprovalError("This discount was approved for a different bill. Ask a manager to approve this one")
     if effective_pct > max_pct + PERCENT_TOLERANCE:
         raise ApprovalError(
-            f"Discount {effective_pct:.2f}% is more than the {max_pct:.2f}% the manager approved, so ask them to approve it again"
+            f"This discount is {effective_pct:.2f}% of the bill's profit, more than the {max_pct:.2f}% the manager approved, so ask them to approve it again"
         )
 
     approver = await User.get_or_none(id=approver_id, active=True).prefetch_related("role")
     if not approver or not await has_permission(approver, OVERRIDE_RESOURCE, "X"):
         raise ApprovalError("The person who approved this discount can't approve discounts any more. Ask again")
     if effective_pct > discount_limit_of(approver) + PERCENT_TOLERANCE:
-        raise ApprovalError(f"{approver.name} can approve discounts up to {discount_limit_of(approver).normalize():f}%, so ask someone with a higher limit")
+        raise ApprovalError(f"{approver.name} can approve discounts up to {discount_limit_of(approver).normalize():f}% of a bill's profit, so ask someone with a higher limit")
     return approver

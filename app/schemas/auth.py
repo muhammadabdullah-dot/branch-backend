@@ -43,3 +43,21 @@ class ChangePasswordRequest(BaseModel):
 
 class MyNameRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+
+
+class EndLoginRequest(BaseModel):
+    """Ending someone's login: why, in a few words ("Shift over", "Forgot to sign out")."""
+
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class DeviceNameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class SignInRulesRequest(BaseModel):
+    """How one person signs in. `counterStaff` null follows how they started (on for a Salesperson who rings up
+    sales). `deviceIds` are the registered devices they may sign in on; empty means any computer here."""
+
+    counterStaff: bool | None = None
+    deviceIds: list[str] = Field(default_factory=list, max_length=50)

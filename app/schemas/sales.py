@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -8,12 +9,20 @@ from app.schemas.types import Money, Percent, Qty
 
 class SaleLineIn(BaseModel):
     productId: str
+    # Always pieces. A pack or box line says so below, and the server works the pieces out from it.
     qty: Decimal
     unitPrice: Decimal
     isReturn: bool = False
     # The alternate (pack) barcode scanned for this line, if any: its pack discount applies instead of
     # the Item's own.
     aliasCode: str | None = None
+    # Sold in other amounts than the stocked unit: which ("piece" or "strip" loose, "pack" or "box" together), how many,
+    # and the price of one (services/sell_levels.py). The server works `qty` out from them.
+    level: Literal["piece", "strip", "pack", "box"] | None = None
+    levelQty: Decimal | None = None
+    levelPrice: Decimal | None = None
+    # A return line: the bill number its goods came from. Required on a return line.
+    returnOf: str | None = Field(default=None, max_length=30)
 
 
 class MemberIn(BaseModel):
@@ -55,6 +64,9 @@ class SaleCreateRequest(BaseModel):
     # the already-committed sale instead of creating a second one. Omit for the old behavior.
     # Required in practice for an above-authority discount, since the approval is bound to it.
     clientRequestId: str | None = None
+    # For someone without "Sell Pharmacy Items" finishing a bill pharmacy staff held: the pass recalling it handed them,
+    # for this bill's clientRequestId (services/pharmacy_service.py).
+    pharmacyPass: str | None = Field(default=None, max_length=4000)
 
 
 class DiscountApprovalRequest(BaseModel):
@@ -90,6 +102,13 @@ class SaleLineOut(BaseModel):
     discAmount: Money | None = None
     # The pack barcode the line was rung up by, so a held bill recalls with its pack discount.
     aliasCode: str | None = None
+    # Sold in other amounts than the stocked unit: which, how many, the price of one, and what one is ("tablet", "10 x 12").
+    level: Literal["piece", "strip", "pack", "box"] | None = None
+    levelQty: Qty | None = None
+    levelPrice: Money | None = None
+    levelDetail: str | None = None
+    # A return line: the bill its goods came from.
+    returnOf: str | None = None
 
 
 class SaleTenderOut(BaseModel):
@@ -158,6 +177,8 @@ class ReturnCreateRequest(BaseModel):
     refundReference: str | None = None
     # Why it came back: a code from the branch's customer return reasons. Optional.
     reason: str | None = Field(default=None, max_length=40)
+    # Needed with the reason Other: what happened, 5 to 20 characters.
+    remark: str | None = Field(default=None, max_length=60)
 
 
 class ReturnQuoteRequest(BaseModel):
@@ -175,6 +196,10 @@ class ReturnRecordOut(BaseModel):
     taxTotal: Money | None = None
     reason: str | None = None
     reasonLabel: str | None = None
+    # The remark typed with the reason Other, the number on the return receipt, and refund, replace or exchange.
+    remark: str | None = None
+    number: str | None = None
+    kind: str | None = None
 
 
 class PaymentProofOut(BaseModel):

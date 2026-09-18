@@ -19,8 +19,8 @@ async def list_all() -> list[HeldBillOut]:
     return [_to_out(b) for b in await held_bills_service.list_all()]
 
 
-async def hold(data: HeldBillCreate) -> HeldBillOut:
-    return _to_out(await held_bills_service.hold(data))
+async def hold(data: HeldBillCreate, user=None) -> HeldBillOut:
+    return _to_out(await held_bills_service.hold(data, user))
 
 
 async def remove(bill_id: str) -> None:

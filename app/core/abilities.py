@@ -22,7 +22,7 @@ from decimal import Decimal
 ABILITIES: list[tuple[str, str, str, str, str]] = [
     # ── the counter ──
     ("counter", "store.billing", "R", "Open Billing", "See the till screen and look Items up."),
-    ("counter", "store.billing", "W", "Ring up sales and take payment", "Includes giving discount up to their own limit."),
+    ("counter", "store.billing", "W", "Ring up sales and take payment", "Includes giving discount up to their own limit, a percent of each bill's profit."),
     ("counter", "store.discount-override", "X", "Approve discounts for others", "Only up to this person's own discount limit."),
     ("counter", "store.hold-recall", "W", "Hold and recall bills", ""),
     ("counter", "store.returns", "W", "Take returns and give refunds", ""),
@@ -35,6 +35,10 @@ ABILITIES: list[tuple[str, str, str, str, str]] = [
     ("counter", "store.counters", "W", "Put people on counters", "Assign and change who works which counter, and add counters."),
     ("counter", "store.staff-on-duty", "R", "Staff on duty", "Who is on the floor now, since when, and what they've rung."),
     ("counter", "store.reprint", "X", "Reprint a receipt", "Print a bill made earlier again. It prints marked REPRINT with who and when."),
+    ("counter", "store.pharmacy", "X", "Sell Pharmacy Items",
+     "Without it, Pharmacy Items don't come up in Billing. Recalling a bill pharmacy staff held and taking its payment still works."),
+    ("counter", "store.sell-past-zero", "X", "Sell when stock shows zero",
+     "Goods are on the shelf but their delivery isn't entered yet. Billing warns but sells; the Item shows on Sold without stock until the delivery is received."),
     # ── stock ──
     ("stock", "inventory.overview", "R", "Stock overview", ""),
     ("stock", "inventory.catalog", "R", "See Items and prices", ""),
@@ -52,6 +56,8 @@ ABILITIES: list[tuple[str, str, str, str, str]] = [
     ("stock", "inventory.movements", "R", "Stock movements", ""),
     ("stock", "inventory.batches", "R", "Batches and expiry", ""),
     ("stock", "inventory.labels", "R", "Print barcode labels", ""),
+    ("stock", "inventory.below-cost", "R", "Priced below cost",
+     "Items in stock whose own price is at or below what they cost with tax (they sell with no discount), and Items with no cost recorded."),
     # ── shipments ──
     ("shipments", "inventory.transfers", "R", "See shipments", "Stock coming in and going out."),
     ("shipments", "inventory.transfers", "W", "Receive incoming shipments", "Count what arrived into a location."),
@@ -69,9 +75,14 @@ ABILITIES: list[tuple[str, str, str, str, str]] = [
     # ── managing the branch ──
     ("branch", "branch-console.dashboard", "R", "Branch dashboard", ""),
     ("branch", "branch-console.approvals", "R", "Approvals inbox", "Counts and adjustments waiting for a decision."),
+    ("branch", "branch-console.sign-ins", "R", "Who is signed in", "Each person signed in now, on which device and since when."),
+    ("branch", "branch-console.sign-ins", "X", "End someone's login", "Signs them out straight away, with a reason. Only a Branch Manager can end a Branch Manager's login."),
     ("branch", "reports", "R", "Reports", "Sales, profit and stock reports."),
     ("branch", "reports.analysis", "R", "ABC and XYZ analysis", "Which Items bring the money in and which sell steadily."),
     ("branch", "reports.kpis", "R", "Figures you can open up", "Every dashboard figure down to the day, the Item, the person and the bill."),
+    ("branch", "reports.scan-history", "R", "Scanned then removed",
+     "Every Item put on a bill at the till, by whom and when, and how it ended: sold, taken off, held or never paid."),
+    ("branch", "reports.price-changes", "R", "Price changes report", "Every change to an Item's prices, cost and discount: old and new, who, when and from where."),
     ("branch", "branch-console.sync", "W", "Head office sync", "See the link to head office and send now."),
     ("branch", "branch-console.backup", "W", "Back up the database", "Backup Now to a chosen folder, the daily backup, and downloading a backup."),
     # ── lists and settings ──
@@ -82,7 +93,7 @@ ABILITIES: list[tuple[str, str, str, str, str]] = [
     ("lists", "branch-console.payment-methods", "R", "See payment methods", "Which payment methods this branch takes."),
     ("lists", "branch-console.payment-methods", "W", "Change payment methods", "Rename a method or switch it off at this branch."),
     ("lists", "branch-console.shop-settings", "R", "See receipt and gift voucher settings", ""),
-    ("lists", "branch-console.shop-settings", "W", "Change receipt and gift voucher settings", "What bills print, gift voucher value and validity, the wholesale discount and the usual low stock level."),
+    ("lists", "branch-console.shop-settings", "W", "Change receipt and gift voucher settings", "What bills print, gift voucher value and validity, the wholesale discount, the usual low stock level and how many days each department takes returns."),
     # ── accounts: the books. Whole-book reports always show every account, because half a statement misleads. ──
     ("accounts-books", "accounts.desk", "R", "Accounts Desk", "Money on hand, what's owed both ways and how the month is going."),
     ("accounts-books", "accounts.desk", "X", "Post the records now", "Posts the latest sales, receipts and payments to the books without waiting."),

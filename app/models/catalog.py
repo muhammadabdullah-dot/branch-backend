@@ -55,6 +55,28 @@ class Product(models.Model):
     # Low stock at this branch means fewer than this left. Blank: the branch's usual low stock level.
     reorder_level = fields.DecimalField(max_digits=12, decimal_places=3, null=True)
 
+    # Added 2026-09-18. Selling in amounts other than the stocked unit (services/sell_levels.py). Stock, price and cost
+    # stay per stocked unit (`unit`) whatever the counter sells.
+    # Smaller: the stocked unit opened and sold loose. How many pieces one unit holds (200 tablets in a box) and, if they
+    # come in strips, how many to a strip; the piece's name ("tablet"); and piece and strip prices, which left blank are
+    # the unit price shared out over its pieces, to the paisa.
+    pieces_per_unit = fields.IntField(null=True)
+    pieces_per_strip = fields.IntField(null=True)
+    piece_unit = fields.CharField(max_length=20, null=True)
+    piece_price = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    strip_price = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    # Bigger: only for an Item with a pack unit, `pack_size` above is how many stocked units make that pack (a carton of
+    # 12 bottles), and this is how many packs make a box. A pack or box price left blank is that many units at the unit
+    # price.
+    packs_per_box = fields.IntField(null=True)
+    pack_price = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    box_price = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    # Added 2026-09-18. Written in by hand on a purchase order because it wasn't in the catalog: someone still has to
+    # check its details on the Item form, and saving the form clears this.
+    needs_details = fields.BooleanField(default=False)
+    # What to check, in words: "Written in by hand on a purchase order by Ali. Check the GST, barcode and department."
+    details_note = fields.CharField(max_length=200, null=True)
+
     class Meta:
         table = "products"
 
@@ -99,23 +121,32 @@ class ProductSupplier(models.Model):
 
 
 class ProductPriceChange(models.Model):
-    """Every change to an Item's sale or retail price, and where it came from. Labels reads this to
+    """Every change to what an Item sells or costs for, one row per value that moved, and where it came from
+    (services/price_history_service.py writes and reads them). Labels reads the sale and retail price rows to
     reprint shelf tags for exactly the Items whose price moved (legacy "Check New Price List")."""
 
     id = fields.UUIDField(pk=True)
     product: fields.ForeignKeyRelation[Product] = fields.ForeignKeyField(
         "models.Product", related_name="price_changes", on_delete=fields.CASCADE
     )
+    # The sale and retail price before and after. On a row for another value they hold the prices at the time.
     old_price = fields.DecimalField(max_digits=12, decimal_places=2)
     new_price = fields.DecimalField(max_digits=12, decimal_places=2)
     old_rpp = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
     new_rpp = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
-    # "form", "import" or "receiving"
+    # Where it came from: "new-item", "form", "import", "import-new", "receiving", "transfer", "transfer-new", "return".
     source = fields.CharField(max_length=20)
     changed_by: fields.ForeignKeyNullableRelation["User"] = fields.ForeignKeyField(
         "models.User", related_name="price_changes", null=True, on_delete=fields.SET_NULL
     )
     at = fields.DatetimeField(auto_now_add=True)
+    # Added 2026-09-18: which value moved (a Product column: price, rpp, wholesale_price, avg_cost, disc_percent...),
+    # from what to what, and the paper it came on (a GRN or shipment number, an imported file's name). Blank on
+    # rows written before then, which hold the sale and retail price together.
+    field = fields.CharField(max_length=30, null=True)
+    old_value = fields.DecimalField(max_digits=16, decimal_places=4, null=True)
+    new_value = fields.DecimalField(max_digits=16, decimal_places=4, null=True)
+    reference = fields.CharField(max_length=120, null=True)
 
     class Meta:
         table = "product_price_changes"

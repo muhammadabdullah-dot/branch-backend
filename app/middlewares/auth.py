@@ -1,26 +1,49 @@
 """Per-request auth/authorization guard. Implemented as FastAPI dependencies (not ASGI middleware)
-since a required resource/action is route-specific — Depends is the idiomatic way to parameterize that.
+since a required resource/action is route-specific: Depends is the idiomatic way to parameterize that.
 """
+from dataclasses import dataclass
+from uuid import UUID
+
 import jwt
 from fastapi import Depends, Header, HTTPException, status
 
-from app.core.security import decode_access_token
+from app.core.security import TOKEN_TTL, decode_access_token
 from app.models import User
+from app.services import login_session_service
 from app.services.rbac_service import has_permission
 
 
-async def get_current_user(authorization: str | None = Header(default=None)) -> User:
+@dataclass
+class CurrentLogin:
+    user: User
+    session_id: UUID
+
+
+async def get_current_login(authorization: str | None = Header(default=None)) -> CurrentLogin:
+    """The signed-in person and the login their token belongs to. A login that has ended (signed out, ended by a
+    manager, left unused) is refused here, so ending one takes effect on the very next request."""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Please sign in.")
     token = authorization.removeprefix("Bearer ").strip()
     try:
         payload = decode_access_token(token)
+    except jwt.ExpiredSignatureError:
+        hours = int(TOKEN_TTL.total_seconds() // 3600)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"Your login ended {hours} hours after sign-in. Sign in again.")
     except jwt.PyJWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Please sign in again.")
+    try:
+        session_id = await login_session_service.check(payload.get("sid"), payload.get("sub"))
+    except login_session_service.LoginEnded as exc:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, exc.message)
     user = await User.get_or_none(id=payload["sub"], active=True)
     if not user:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found or inactive")
-    return user
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account is switched off. Ask the Branch Manager.")
+    return CurrentLogin(user=user, session_id=session_id)
+
+
+async def get_current_user(login: CurrentLogin = Depends(get_current_login)) -> User:
+    return login.user
 
 
 def access_name(resource: str, action: str) -> str | None:
@@ -64,7 +87,7 @@ async def require_branch_manager(user: User = Depends(get_current_user)) -> User
 
 
 def require_any_permission(*pairs: tuple[str, str]):
-    """Passes if the caller holds ANY of the given (resource, action) pairs — for the rare screen
+    """Passes if the caller holds ANY of the given (resource, action) pairs, for the rare screen
     genuinely reachable from two different modules (e.g. Parties, read from both Billing and
     Customer Registry)."""
 

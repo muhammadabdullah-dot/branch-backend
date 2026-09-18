@@ -14,7 +14,7 @@ from tortoise.transactions import atomic
 from app.models import GRNLine, Product, ProductAlias, ProductPriceChange, ProductSupplier, Supplier, User
 from app.schemas.catalog import ProductAliasIn, ProductCreate, ProductSupplierIn, ProductUpdate
 from app.schemas.import_result import ImportRowError, ImportSummary
-from app.services import media_service
+from app.services import media_service, price_history_service
 from app.services.import_service import cell_bool, cell_str_any, parse_rows, row_error
 
 
@@ -30,10 +30,13 @@ _FIELD_MAP = {
     "discPercent": "disc_percent", "discFlat": "disc_flat", "lockDisc": "lock_disc",
     "parentId": "parent_id", "parentQty": "parent_qty",
     "wholesalePrice": "wholesale_price", "reorderLevel": "reorder_level",
+    "packsPerBox": "packs_per_box", "packPrice": "pack_price", "boxPrice": "box_price",
+    "piecesPerUnit": "pieces_per_unit", "piecesPerStrip": "pieces_per_strip", "pieceUnit": "piece_unit",
+    "piecePrice": "piece_price", "stripPrice": "strip_price",
 }
 _TEXT_FIELDS = {
     "name", "unit", "barcode", "packUnit", "department", "category", "itemClass", "subclass",
-    "manufacturer", "brand", "variant", "remarks",
+    "manufacturer", "brand", "variant", "remarks", "pieceUnit",
 }
 # Columns a form update may never set to NULL, whatever the request says.
 _REQUIRED_COLUMNS = {"name", "price", "tax_rate", "is_weighed", "unit", "active", "disc_percent", "disc_flat", "lock_disc"}
@@ -60,7 +63,7 @@ PRODUCT_SORTS = {
 
 async def list_all(
     q: str | None, limit: int, offset: int, ids: list[str] | None = None,
-    sort: str | None = None, order: str | None = None, supplier_id: str | None = None,
+    sort: str | None = None, order: str | None = None, supplier_id: str | None = None, needs_details: bool | None = None,
 ) -> tuple[list[Product], int]:
     """Paginated + searchable — a real catalog runs into the tens of thousands of rows (this was
     built against a 47k-row real export), so 'fetch everything' isn't just slow, it's structurally
@@ -75,6 +78,8 @@ async def list_all(
         qs = qs.filter(id__in=ids)
     if supplier_id:
         qs = qs.filter(supplier_links__supplier_id=supplier_id).distinct()
+    if needs_details is not None:
+        qs = qs.filter(needs_details=needs_details)
     if q:
         qs = qs.filter(Q(name__icontains=q) | Q(sku__icontains=q) | Q(barcode__icontains=q))
     total = await qs.count()
@@ -151,15 +156,8 @@ async def _check_parent(product_id: str | None, parent_id: str | None, parent_qt
         current = await Product.get(id=current.parent_id)
 
 
-async def _log_price_change(
-    product: Product, old_price: Decimal, old_rpp: Decimal | None, source: str, user: User | None,
-) -> None:
-    if product.price == old_price and product.rpp == old_rpp:
-        return
-    await ProductPriceChange.create(
-        product=product, old_price=old_price, new_price=product.price,
-        old_rpp=old_rpp, new_rpp=product.rpp, source=source, changed_by=user,
-    )
+# Every price, cost and discount change is logged by price_history_service: a snapshot before, a row per value
+# that moved after.
 
 
 @atomic()
@@ -180,11 +178,8 @@ async def create(data: ProductCreate, user: User | None = None) -> Product:
         fields["parent_qty"] = None
     fields["avg_cost"] = fields.get("avg_cost") or Decimal("0")
     product = await Product.create(id=sku, sku=sku, **fields)
-    # A new Item's first price counts as a price to put on a shelf tag.
-    await ProductPriceChange.create(
-        product=product, old_price=product.price, new_price=product.price, old_rpp=None, new_rpp=product.rpp,
-        source="new-item", changed_by=user,
-    )
+    # A new Item's first price starts its price history, and counts as a price to put on a shelf tag.
+    await price_history_service.save_rows([price_history_service.first_price(product, "new-item", None, user)])
     return product
 
 
@@ -193,7 +188,7 @@ async def update(product_id: str, data: ProductUpdate, user: User | None = None)
     product = await Product.get_or_none(id=product_id)
     if not product:
         raise CatalogError("Item not found", status=404)
-    old_price, old_rpp = product.price, product.rpp
+    before = price_history_service.snapshot(product)
     changes = _to_model_fields(data.model_dump(exclude_unset=True))
     await _refuse_switched_off(changes, product)
 
@@ -213,8 +208,11 @@ async def update(product_id: str, data: ProductUpdate, user: User | None = None)
         if column in _REQUIRED_COLUMNS and value is None:
             continue
         setattr(product, column, value)
+    # The whole Item form was saved (it always sends the name), so an Item written in by hand is no longer waiting.
+    if "name" in changes:
+        product.needs_details = False
     await product.save()
-    await _log_price_change(product, old_price, old_rpp, "form", user)
+    await price_history_service.record(product, before, "form", None, user)
     return product
 
 
@@ -320,9 +318,11 @@ async def _refuse_switched_off(fields: dict, product: Product | None = None) -> 
 
 
 async def price_changes(from_at: datetime | None, to_at: datetime | None, limit: int = 500) -> list[ProductPriceChange]:
-    """Real price moves, plus each new Item's first price. A save that left the price alone is never
-    recorded, so this list is exactly the shelf tags that need reprinting."""
-    qs = ProductPriceChange.all()
+    """Real sale and retail price moves, plus each new Item's first price. A save that left the price alone is never
+    recorded, so this list is exactly the shelf tags that need reprinting. Cost, wholesale and discount changes don't
+    touch a shelf tag, and Items added from a file are left out (a first import adds tens of thousands)."""
+    shelf = Q(field__in=list(price_history_service.SHELF_FIELDS)) | Q(field__isnull=True)
+    qs = ProductPriceChange.filter(shelf).exclude(source="import-new")
     if from_at:
         qs = qs.filter(at__gte=from_at)
     if to_at:
@@ -371,7 +371,7 @@ def _row_to_product_create(row: dict) -> ProductCreate:
     return ProductCreate(sku=sku, name=name, price=Decimal(price), **{k: v for k, v in present.items() if v is not None})
 
 
-async def import_products(filename: str, content: bytes) -> ImportSummary:
+async def import_products(filename: str, content: bytes, user: User | None = None) -> ImportSummary:
     """Bulk-inserts new products (Product.bulk_create) rather than one create() per row —
     necessary at real-catalog scale (tens of thousands of rows); updates to already-existing
     skus stay per-row since a first import is almost always all-creates."""
@@ -399,15 +399,20 @@ async def import_products(filename: str, content: bytes) -> ImportSummary:
         except (ValueError, InvalidOperation, KeyError) as exc:
             errors.append(ImportRowError(row=i, message=row_error(exc)))
 
+    # Price history is collected across the whole file and written in one bulk insert at the end.
+    file_name = (filename or "").replace("\\", "/").split("/")[-1] or None
+    history = []
     if to_create:
         await Product.bulk_create(to_create, batch_size=500)
+        history += [price_history_service.first_price(p, "import-new", file_name, user) for p in to_create]
     for sku, fields in to_update:
         product = await Product.get(sku=sku)
-        old_price, old_rpp = product.price, product.rpp
+        before = price_history_service.snapshot(product)
         for key, value in fields.items():
             setattr(product, key, value)
         await product.save()
-        await _log_price_change(product, old_price, old_rpp, "import", None)
+        history += price_history_service.rows_for(product, before, "import", file_name, user)
+    await price_history_service.save_rows(history)
 
     return ImportSummary(created=len(to_create), updated=len(to_update), errors=errors)
 

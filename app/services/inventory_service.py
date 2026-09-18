@@ -18,7 +18,6 @@ from app.models import (
     OutboxEvent,
     PhysicalCount,
     Product,
-    ProductPriceChange,
     PurchaseReturn,
     PurchaseReturnLine,
     StockMovement,
@@ -27,6 +26,7 @@ from app.models import (
     balance_for,
     next_value,
 )
+from app.services import price_history_service
 from app.schemas.inventory import (
     AdjustmentSubmitRequest,
     CountSubmitRequest,
@@ -212,6 +212,8 @@ async def receive_grn(user: User, payload: GRNCreateRequest) -> GRN:
     gross_total = disc_total = net_total = tax_total = Decimal("0")
     for line in payload.lines:
         product = products[line.productId]
+        # Cost, and any new price the delivery brings, go into the Item's price history against this GRN.
+        price_before = price_history_service.snapshot(product)
         line_net = _line_net_cost(line)
         gross_total += line.qty * line.unitPrice
         disc_total += line.qty * line.unitPrice - _line_gross(line) + line.flatDisc
@@ -235,8 +237,9 @@ async def receive_grn(user: User, payload: GRNCreateRequest) -> GRN:
             if old_balance > 0:
                 product.avg_cost = (product.avg_cost * old_balance + _line_net_cost(line)) / (old_balance + incoming_qty)
             else:
-                # Stock at or below zero has no cost left to average with — what was sold before it was
-                # received has already gone. Averaging over the negative figure divided this delivery's
+                # Stock at or below zero has no cost left to average with: what was sold before it was
+                # received has already gone (a sale past zero, say, whose cost of sale was taken at the average then).
+                # The delivery first makes up what is missing and what is left is this delivery's stock, at its own cost. Averaging over the negative figure divided this delivery's
                 # cost by too few units (Rs 120 stock came out at Rs 444); its own cost per unit is right.
                 product.avg_cost = _line_net_cost(line) / incoming_qty
             await product.save(update_fields=["avg_cost"])
@@ -251,10 +254,7 @@ async def receive_grn(user: User, payload: GRNCreateRequest) -> GRN:
                 product.rpp = line.newRetailPrice
             if product.price != old_price or product.rpp != old_rpp:
                 await product.save(update_fields=["price", "rpp"])
-                await ProductPriceChange.create(
-                    product=product, old_price=old_price, new_price=product.price,
-                    old_rpp=old_rpp, new_rpp=product.rpp, source="receiving", changed_by=user,
-                )
+        await price_history_service.record(product, price_before, "receiving", grn.grn_number, user)
 
         # Bonus quantity genuinely adds to physical stock (contracts.md §6). The GRN number goes on the movement so
         # stock origin shows it came from a supplier, and its cost per unit so the books value it.

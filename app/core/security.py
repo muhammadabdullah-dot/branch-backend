@@ -1,4 +1,4 @@
-"""Password hashing and JWT issuance/verification — no session store, per contracts.md §2.2."""
+"""Password hashing and JWT issuance/verification. Each token names its login (see models/login_session.py)."""
 import hashlib
 import hmac
 from datetime import datetime, timedelta, timezone
@@ -32,9 +32,13 @@ def verify_password(password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password.encode(), password_hash.encode())
 
 
-def create_access_token(user_id: str) -> str:
-    now = datetime.now(timezone.utc)
+def create_access_token(user_id: str, session_id: str | None = None, issued_at: datetime | None = None) -> str:
+    """A sign-in token. `sid` names the login it belongs to (models/login_session.py): a token is only good
+    while that login is, so a login ended by sign-out or by a manager stops working at once."""
+    now = issued_at or datetime.now(timezone.utc)
     payload = {"sub": user_id, "iat": now, "exp": now + TOKEN_TTL}
+    if session_id:
+        payload["sid"] = session_id
     return jwt.encode(payload, settings.jwt_secret, algorithm=ALGORITHM)
 
 

@@ -10,6 +10,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import unquote
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -60,7 +61,7 @@ class ActivityMiddleware:
             return
 
         body = bytearray()
-        status = {"code": 500}
+        status = {"code": 500, "note": None}
 
         async def receive_wrapper() -> Message:
             message = await receive()
@@ -71,18 +72,23 @@ class ActivityMiddleware:
         async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
                 status["code"] = message["status"]
+                # A route can say more about what happened than its request shows (who a login belonged to, why a
+                # sign-in was refused) in this header, percent-encoded.
+                for key, value in message.get("headers") or []:
+                    if key.lower() == b"x-activity-note":
+                        status["note"] = unquote(value.decode("latin-1"))[:300]
             await send(message)
 
         try:
             await self.app(scope, receive_wrapper, send_wrapper)
         finally:
             try:
-                await _record(scope, bytes(body), status["code"])
+                await _record(scope, bytes(body), status["code"], status["note"])
             except Exception as exc:  # noqa: BLE001 — the record must never cost the person their response
                 logs.log.warning("activity: couldn't record %s %s", method, path, exc_info=exc)
 
 
-async def _record(scope: Scope, body: bytes, status_code: int) -> None:
+async def _record(scope: Scope, body: bytes, status_code: int, note: str | None = None) -> None:
     from app.core.device_context import get_device_id  # noqa: F401 — device id comes from the header here
     from app.models import ActivityLog, OutboxEvent, User
 
@@ -113,11 +119,15 @@ async def _record(scope: Scope, body: bytes, status_code: int) -> None:
     action = _label(name, method, path)
     if path == "/auth/login":
         email = (detail or {}).get("email") if isinstance(detail, dict) else None
-        if status_code < 400 and email:
+        # A refused sign-in (403, 409) had the right password: it is that person's, like a successful one.
+        if (status_code < 400 or status_code in (403, 409)) and email:
             user = await User.get_or_none(email=str(email).strip().lower())
-        action = "Sign in" if status_code < 400 else "Failed sign-in"
+        action = "Sign in" if status_code < 400 else ("Sign-in refused" if status_code in (403, 409) else "Failed sign-in")
     elif path == "/auth/logout":
         action = "Sign out"
+
+    if note:
+        detail = {**detail, "note": note} if isinstance(detail, dict) else {"note": note, **({"sent": detail} if detail else {})}
 
     now = datetime.now(timezone.utc)
     row = await ActivityLog.create(

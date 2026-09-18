@@ -53,6 +53,20 @@ class ProductOut(BaseModel):
     wholesalePrice: Money | None = None
     # Blank: the branch's usual low stock level.
     reorderLevel: Decimal | None = None
+    # Sold loose: pieces in one stocked unit and in a strip, the piece's name, and their prices (blank: the unit price
+    # shared out over its pieces, to the paisa).
+    piecesPerUnit: int | None = None
+    piecesPerStrip: int | None = None
+    pieceUnit: str | None = None
+    piecePrice: Money | None = None
+    stripPrice: Money | None = None
+    # With a pack unit: packs in a box, and pack and box prices (blank: that many units at the unit price).
+    packsPerBox: int | None = None
+    packPrice: Money | None = None
+    boxPrice: Money | None = None
+    # Written in by hand on a purchase order and waiting for someone to save its Item form.
+    needsDetails: bool = False
+    detailsNote: str | None = None
     # Set only by the code lookup, when the code scanned was an alternate barcode: that pack's
     # quantity and discount, so a carton scan can ring up the carton rather than one unit.
     matchedAlias: ProductAliasOut | None = None
@@ -123,6 +137,15 @@ class ProductCreate(BaseModel):
     parentQty: Decimal | None = Field(default=None, gt=0)
     wholesalePrice: Decimal | None = Field(default=None, ge=0)
     reorderLevel: Decimal | None = Field(default=None, ge=0)
+    # Up to 1,000 pieces to a unit: stock keeps three decimals of a unit, which is one piece in a thousand.
+    piecesPerUnit: int | None = Field(default=None, ge=1, le=1000)
+    piecesPerStrip: int | None = Field(default=None, ge=1, le=1000)
+    pieceUnit: str | None = Field(default=None, max_length=20)
+    piecePrice: Decimal | None = Field(default=None, ge=0)
+    stripPrice: Decimal | None = Field(default=None, ge=0)
+    packsPerBox: int | None = Field(default=None, ge=1)
+    packPrice: Decimal | None = Field(default=None, ge=0)
+    boxPrice: Decimal | None = Field(default=None, ge=0)
 
 
 class ProductUpdate(BaseModel):
@@ -154,6 +177,15 @@ class ProductUpdate(BaseModel):
     parentQty: Decimal | None = Field(default=None, gt=0)
     wholesalePrice: Decimal | None = Field(default=None, ge=0)
     reorderLevel: Decimal | None = Field(default=None, ge=0)
+    # Up to 1,000 pieces to a unit: stock keeps three decimals of a unit, which is one piece in a thousand.
+    piecesPerUnit: int | None = Field(default=None, ge=1, le=1000)
+    piecesPerStrip: int | None = Field(default=None, ge=1, le=1000)
+    pieceUnit: str | None = Field(default=None, max_length=20)
+    piecePrice: Decimal | None = Field(default=None, ge=0)
+    stripPrice: Decimal | None = Field(default=None, ge=0)
+    packsPerBox: int | None = Field(default=None, ge=1)
+    packPrice: Decimal | None = Field(default=None, ge=0)
+    boxPrice: Decimal | None = Field(default=None, ge=0)
 
 
 class ProductAliasIn(BaseModel):

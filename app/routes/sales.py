@@ -24,11 +24,11 @@ router = APIRouter(tags=["sales"])
 _read = require_permission("store.billing", "R")
 _write = require_permission("store.billing", "W")
 _returns_write = require_permission("store.returns", "W")
-# Returns.tsx looks up the original invoice before refunding it — a user granted only
+# Returns.tsx looks up the original invoice before refunding it: a user granted only
 # store.returns (a valid, real grant under per-user RBAC) needs to be able to do that
 # without also being granted store.billing.
 _lookup_for_sale_or_return = require_any_permission(("store.billing", "R"), ("store.returns", "R"))
-# Branch-wide sales list — read by X/Z, the Dashboard, and Reports, none of which imply
+# Branch-wide sales list: read by X/Z, the Dashboard, and Reports, none of which imply
 # store.billing on their own (a Sales Manager reading X/Z, or a Branch Manager reading
 # their own Dashboard, may legitimately lack store.billing).
 _list_read = require_any_permission(("store.xz", "R"), ("reports", "R"), ("branch-console.dashboard", "R"))
@@ -73,7 +73,7 @@ async def payment_proof(
 
 # The salesperson asks, from the bill they're ringing up; the approver is whoever signs in here
 # (or the salesperson, if they hold store.discount-override themselves). Gated on store.billing W
-# like the sale it approves — the approver's authority is the service's check, not the route's.
+# like the sale it approves: the approver's authority is the service's check, not the route's.
 @router.post("/sales/discount-approvals", response_model=DiscountApprovalOut)
 async def request_discount_approval(
     payload: DiscountApprovalRequest, user: User = Depends(_write)
@@ -106,3 +106,10 @@ async def quote_return(payload: ReturnQuoteRequest, user: User = Depends(_return
 @router.post("/returns", response_model=ReturnRecordOut)
 async def create_return(payload: ReturnCreateRequest, user: User = Depends(_returns_write)) -> ReturnRecordOut:
     return await returns_controller.create(user, payload)
+
+
+# Sold without stock, Priced below cost, the pharmacy setting, scan history and recalling a held bill: their own file,
+# brought in here so app/main.py needs no line for them.
+from app.routes.billing_extras import router as _billing_extras_router  # noqa: E402
+
+router.include_router(_billing_extras_router)

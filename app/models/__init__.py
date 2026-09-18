@@ -23,6 +23,7 @@ from app.models.held_bill import HeldBill
 from app.models.identity import IDENTITY_PK, BranchIdentity, SyncState
 from app.models.inventory import StockMovement, balance_for
 from app.models.location import Location
+from app.models.login_session import LoginSession, UserDevice
 from app.models.masters import ListEntry, ShopSetting
 from app.models.notice import Notice, NoticeRead
 from app.models.member import LoyaltyEntry, LoyaltySettings, Member
@@ -32,6 +33,7 @@ from app.models.purchase_return import PurchaseReturn, PurchaseReturnLine
 from app.models.requisition import StockRequest, StockRequestLine
 from app.models.role import Role, RoleDefaultPermission
 from app.models.sales import ReturnLine, ReturnRecord, SaleLine, SaleRecord, SaleTender
+from app.models.scan_history import ScanEvent, ScanLine
 from app.models.sequence import Counter, next_value
 from app.models.supplier import Supplier
 from app.models.sync import OutboxEvent
@@ -90,6 +92,10 @@ __all__ = [
     "ReturnRecord",
     "ReturnLine",
     "HeldBill",
+    "ScanLine",
+    "ScanEvent",
+    "LoginSession",
+    "UserDevice",
     "GiftVoucher",
     "VoucherRedemption",
     "StockMovement",

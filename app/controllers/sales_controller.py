@@ -28,6 +28,8 @@ async def _sale_out(sale: SaleRecord) -> SaleRecordOut:
                 productId=str(l.product_id), name=l.product.name, sku=l.product.sku,
                 qty=l.qty, unitPrice=l.unit_price, isWeighed=l.product.is_weighed, isReturn=l.is_return,
                 discAmount=l.disc_amount, aliasCode=l.alias_code,
+                level=l.sell_level, levelQty=l.level_qty, levelPrice=l.level_price, levelDetail=l.level_detail,
+                returnOf=l.return_of_invoice,
             )
             for l in sale.lines
         ],
@@ -73,7 +75,8 @@ async def create(user: User, payload: SaleCreateRequest) -> SaleRecordOut:
     try:
         sale = await sales_service.create_sale(user, payload)
     except sales_service.SaleError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message)
+        # 409 for a bill that would sell at a loss; 400 for everything else wrong with it.
+        raise HTTPException(exc.status, exc.message)
     return await _sale_out(sale)
 
 

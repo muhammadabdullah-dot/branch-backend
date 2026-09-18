@@ -37,6 +37,7 @@ from app.routes.rbac import users_router
 from app.routes.registration import router as registration_router
 from app.routes.registration import sync_router
 from app.routes.sales import router as sales_router
+from app.routes.returns import router as returns_router
 from app.routes.suppliers import router as suppliers_router
 from app.routes.till import router as till_router
 from app.services.gift_voucher_service import link_named_vouchers
@@ -81,6 +82,7 @@ app.include_router(parties_router)
 app.include_router(till_router)
 app.include_router(counters_router)
 app.include_router(sales_router)
+app.include_router(returns_router)
 app.include_router(held_bills_router)
 app.include_router(gift_vouchers_router)
 app.include_router(exports_router)
@@ -128,6 +130,11 @@ async def _seed() -> None:
     boarded = await give_managers_the_counter_board()
     if boarded:
         print(f"  counters: {boarded} Branch Manager account(s) can now put people on counters", flush=True)
+    from app.services.login_session_service import give_managers_the_sign_ins
+
+    signed = await give_managers_the_sign_ins()
+    if signed:
+        print(f"  logins: {signed} Branch Manager account(s) can now see who is signed in and end a login", flush=True)
     from app.services import accounts_chart_service, staff_sync_service
     from app.services.seed_service import give_branch_managers_the_books
 

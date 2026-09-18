@@ -171,13 +171,17 @@ async def receive(
         if qty > ZERO:
             # Arrives at what it cost the sender, and averages in with what's already on the shelf.
             if line.unit_cost is not None:
+                from app.services import price_history_service
+
                 product = line.product
+                cost_before = price_history_service.snapshot(product)
                 on_hand = await balance_for(product.id)
                 if on_hand > ZERO and product.avg_cost:
                     product.avg_cost = (product.avg_cost * on_hand + qty * line.unit_cost) / (on_hand + qty)
                 else:
                     product.avg_cost = line.unit_cost
                 await product.save(update_fields=["avg_cost"])
+                await price_history_service.record(product, cost_before, "transfer", transfer.number, user)
             await StockMovement.create(
                 product_id=line.product_id, location=location, kind="transfer-in", qty=qty,
                 reason=transfer.number, origin_user=user, at=now, unit_cost=line.unit_cost,
@@ -451,11 +455,15 @@ async def _product_for(line: dict) -> Product:
     if product:
         return product
     product_id = sku if not await Product.exists(id=sku) else f"ho-{sku}"
-    return await Product.create(
+    product = await Product.create(
         id=product_id[:40], sku=sku[:40], name=(line.get("name") or sku)[:160], price=Decimal(str(line.get("price") or "0")),
         tax_rate=Decimal(str(line.get("taxRate") or "0")), unit=(line.get("unit") or "pc")[:20],
         is_weighed=bool(line.get("isWeighed")), avg_cost=Decimal(str(line.get("unitCost") or "0")), remarks="Added by a head office transfer",
     )
+    from app.services import price_history_service
+
+    await price_history_service.save_rows([price_history_service.first_price(product, "transfer-new")])
+    return product
 
 
 def _dt(value):

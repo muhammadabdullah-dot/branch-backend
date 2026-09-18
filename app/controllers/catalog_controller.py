@@ -26,6 +26,10 @@ def _fields(p: Product, include_aliases: bool = False) -> dict:
         discPercent=p.disc_percent, discFlat=p.disc_flat, lockDisc=p.lock_disc, variant=p.variant,
         origin=p.origin, remarks=p.remarks, hasPicture=bool(p.picture), parentId=p.parent_id, parentQty=p.parent_qty,
         wholesalePrice=p.wholesale_price, reorderLevel=p.reorder_level,
+        packsPerBox=p.packs_per_box, packPrice=p.pack_price, boxPrice=p.box_price,
+        piecesPerUnit=p.pieces_per_unit, piecesPerStrip=p.pieces_per_strip, pieceUnit=p.piece_unit,
+        piecePrice=p.piece_price, stripPrice=p.strip_price,
+        needsDetails=p.needs_details, detailsNote=p.details_note if p.needs_details else None,
     )
 
 
@@ -46,9 +50,9 @@ def _raise(exc: catalog_service.CatalogError) -> None:
 
 async def list_all(
     q: str | None, limit: int, offset: int, ids: list[str] | None = None,
-    sort: str | None = None, order: str | None = None, supplier_id: str | None = None,
+    sort: str | None = None, order: str | None = None, supplier_id: str | None = None, needs_details: bool | None = None,
 ) -> ProductListOut:
-    items, total = await catalog_service.list_all(q, limit, offset, ids, sort, order, supplier_id)
+    items, total = await catalog_service.list_all(q, limit, offset, ids, sort, order, supplier_id, needs_details)
     return ProductListOut(items=[_to_out(p, include_aliases=True) for p in items], total=total)
 
 
@@ -134,8 +138,8 @@ async def price_changes(from_at: datetime | None, to_at: datetime | None) -> lis
     ]
 
 
-async def import_file(filename: str, content: bytes) -> ImportSummary:
-    return await catalog_service.import_products(filename, content)
+async def import_file(filename: str, content: bytes, user: User | None = None) -> ImportSummary:
+    return await catalog_service.import_products(filename, content, user)
 
 
 async def import_aliases_file(filename: str, content: bytes) -> ImportSummary:

@@ -44,6 +44,11 @@ RESOURCES: list[str] = [
     "store.staff-on-duty",
     # Printing a bill made earlier again, marked REPRINT with who and when (recorded in the activity log).
     "store.reprint",
+    # Selling what the shelf holds when the records show none (its delivery isn't entered yet): Main Store goes below zero
+    # for that sale only, and the Item shows on Sold without stock. See services/stock_guard.py.
+    "store.sell-past-zero",
+    # Putting Pharmacy Items on a bill (which departments are Pharmacy is a branch setting). See services/pharmacy_service.py.
+    "store.pharmacy",
     "inventory.overview",
     "inventory.catalog",
     "inventory.suppliers",
@@ -54,6 +59,8 @@ RESOURCES: list[str] = [
     "inventory.movements",
     "inventory.batches",
     "inventory.labels",
+    # Items in stock priced at or below what they cost with tax, and Items with no cost recorded.
+    "inventory.below-cost",
     "inventory.counts",
     "inventory.counts.approve",
     "inventory.adjustments",
@@ -69,6 +76,8 @@ RESOURCES: list[str] = [
     "inventory.locations",
     "branch-console.dashboard",
     "branch-console.approvals",
+    # Who is signed in where (R), and ending someone's login (X). Counter staff sign in once, on their own device.
+    "branch-console.sign-ins",
     "branch-console.staff",
     "branch-console.staff-access",
     "branch-console.customers",
@@ -91,6 +100,10 @@ RESOURCES: list[str] = [
     # ABC / XYZ analysis of Items, and dashboard figures opened down to the bill.
     "reports.analysis",
     "reports.kpis",
+    # Every Item put on a bill at the till and how its line ended (sold, taken off, held, never paid).
+    "reports.scan-history",
+    # Every change to an Item's prices, cost and discount, who made it and where it came from.
+    "reports.price-changes",
     # Backing the database up (Backup Now, the daily backup, downloads) and putting a backup back. Restore is a
     # Branch Manager's alone — see core/abilities.py.
     "branch-console.backup",

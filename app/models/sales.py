@@ -36,7 +36,7 @@ class SaleRecord(models.Model):
     is_credit_sale = fields.BooleanField(default=False)
     fbr_invoice_number = fields.CharField(max_length=30)
     # Client-generated idempotency key (contracts.md's architecture-doc gap, found live
-    # 2026-09-12: a lost response + a still-enabled retry button could double-submit a sale —
+    # 2026-09-12: a lost response + a still-enabled retry button could double-submit a sale:
     # double stock deduction, double credit-balance increment, double voucher redemption).
     # Optional/nullable: a caller that doesn't send one gets the old, non-idempotent behavior.
     client_request_id = fields.CharField(max_length=80, null=True, unique=True)
@@ -58,7 +58,7 @@ class SaleLine(models.Model):
     qty = fields.DecimalField(max_digits=12, decimal_places=3)
     unit_price = fields.DecimalField(max_digits=12, decimal_places=2)
     is_return = fields.BooleanField(default=False)
-    # The alternate (pack) barcode the line was rung up by, when it was one — its pack discount applied.
+    # The alternate (pack) barcode the line was rung up by, when it was one: its pack discount applied.
     alias_code = fields.CharField(max_length=60, null=True)
     # Everything taken off this line: the Item's own discount plus its share of the bill discount.
     # Null on sales from before this was recorded.
@@ -67,6 +67,18 @@ class SaleLine(models.Model):
     unit_cost = fields.DecimalField(max_digits=12, decimal_places=4, null=True)
     # The GST charged on this line (after its discount). Null on sales from before this was recorded.
     tax_amount = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    # Added 2026-09-18. A line sold in other amounts than the stocked unit (services/sell_levels.py): "piece" or "strip"
+    # (the unit opened and sold loose), or "pack" or "box" (several units together); how many of them, the price of one,
+    # and what one is in plain words ("tablet", "10" pieces to a strip, "12" units to a pack, "10 x 12" for a box).
+    # `qty` stays in stocked units (5 tablets of a 200-tablet box is 0.025) and `unit_price` the price of one unit, so
+    # every figure that counts units still adds up. Null on lines sold by the stocked unit.
+    sell_level = fields.CharField(max_length=8, null=True)
+    # Added 2026-09-18. A return line rung on Billing names the bill its goods came from, so the return window and what
+    # that bill has left to return are checked against it. Null on sold lines and on return lines from before.
+    return_of_invoice = fields.CharField(max_length=30, null=True)
+    level_qty = fields.DecimalField(max_digits=12, decimal_places=3, null=True)
+    level_price = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    level_detail = fields.CharField(max_length=30, null=True)
 
     class Meta:
         table = "sale_lines"
@@ -84,7 +96,7 @@ class SaleTender(models.Model):
     # What proves the payment. Card: the last 4 digits from the machine's shop copy. Easypaisa / JazzCash:
     # the paying account's number. Bank transfer: null (see transaction_id and account).
     reference = fields.CharField(max_length=40, null=True)
-    # The transfer's transaction ID — required for a bank transfer, optional for a wallet.
+    # The transfer's transaction ID: required for a bank transfer, optional for a wallet.
     transaction_id = fields.CharField(max_length=60, null=True)
     # The shop account a bank transfer went into.
     account = fields.CharField(max_length=80, null=True)
@@ -116,10 +128,21 @@ class ReturnRecord(models.Model):
     # Why the goods came back, from the branch's list of customer return reasons (a ListEntry code). Null on
     # returns taken before reasons were recorded, and when none was picked.
     reason = fields.CharField(max_length=40, null=True)
+    # The remark typed with the reason Other (5 to 20 characters), or why a sale was reversed onto its voucher.
     note = fields.TextField(null=True)
     # The GST inside refund_total, and the rupee rounding the refund took. Null on older returns.
     tax_total = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
     rounding = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
+    # The number printed on the return receipt (e.g. MT-RT-2026-000001). Null on returns taken before receipts.
+    number = fields.CharField(max_length=30, null=True)
+    # refund (money back), replace (the same Items went back to the customer) or exchange (other Items went out).
+    # Null on older returns, which were all refunds.
+    kind = fields.CharField(max_length=10, null=True)
+    # For a replace or an exchange: the bill the Items going out were rung on. The return's refund paid for it in
+    # the same way (refund_method), so the drawer and the books only move by the difference.
+    exchange_sale: fields.ForeignKeyNullableRelation[SaleRecord] = fields.ForeignKeyField(
+        "models.SaleRecord", related_name="exchange_returns", null=True, on_delete=fields.SET_NULL
+    )
 
     class Meta:
         table = "return_records"

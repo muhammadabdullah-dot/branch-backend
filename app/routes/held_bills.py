@@ -18,7 +18,7 @@ async def list_all(user: User = Depends(_read)) -> list[HeldBillOut]:
 
 @router.post("", response_model=HeldBillOut)
 async def hold(payload: HeldBillCreate, user: User = Depends(_write)) -> HeldBillOut:
-    return await held_bills_controller.hold(payload)
+    return await held_bills_controller.hold(payload, user)
 
 
 @router.delete("/{bill_id}")

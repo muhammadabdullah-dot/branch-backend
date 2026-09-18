@@ -1,4 +1,4 @@
-"""Services are where ORM calls happen — no repository layer. RBAC enforcement and management both live here."""
+"""Services are where ORM calls happen: no repository layer. RBAC enforcement and management both live here."""
 from tortoise.transactions import in_transaction
 
 from decimal import Decimal
@@ -36,7 +36,9 @@ async def list_users() -> list[User]:
 
 
 def discount_limit_of(user: User) -> Decimal:
-    """The most bill discount this person may give — and approve for others."""
+    """The most bill discount this person may give, and approve for others, as a percent of the bill's margin: what it
+    sells for after the Items' own discounts, less what those Items cost the shop with tax (services/sale_rules.py).
+    100% lets them sell at cost; nothing lets anyone sell below it."""
     return user.discount_limit if user.discount_limit is not None else preset_limit(user.role_id)
 
 
@@ -100,7 +102,7 @@ async def create_user(
 
     The account is created with its role's standard access materialized into real permission rows,
     the same way the seeded accounts are. That matters: `RoleDefaultPermission` is a *template*, not
-    a live link — nothing reads it after creation — so an account created without this step can
+    a live link: nothing reads it after creation: so an account created without this step can
     sign in and see nothing at all.
     """
     email = (email or "").strip().lower()

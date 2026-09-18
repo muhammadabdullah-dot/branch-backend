@@ -1,5 +1,5 @@
 from app.core.security import create_access_token, hash_password, verify_password
-from app.models import User
+from app.models import LoginSession, User
 from app.schemas.auth import LoginResponse, UserOut
 from app.services.rbac_service import discount_limit_of, effective_permissions
 
@@ -30,9 +30,10 @@ async def authenticate(email: str, password: str) -> User | None:
     return user
 
 
-async def build_login_response(user: User) -> LoginResponse:
+async def build_login_response(user: User, session: LoginSession) -> LoginResponse:
+    """The token names the login it belongs to (services/login_session_service.py)."""
     await user.fetch_related("role")
-    token = create_access_token(str(user.id))
+    token = create_access_token(str(user.id), str(session.id), session.started_at)
     permissions = await effective_permissions(user)
     return LoginResponse(token=token, user=await user_out(user, permissions), permissions=permissions)
 
@@ -64,7 +65,7 @@ async def change_own_password(user: User, current: str, new: str, confirm: str) 
 
 
 async def change_own_name(user: User, name: str) -> None:
-    """Names are what every sale, count and approval is traced to, so only a Branch Manager changes one —
+    """Names are what every sale, count and approval is traced to, so only a Branch Manager changes one,
     their own included."""
     if user.role_id != "branch-manager":
         raise AccountError("Ask your Branch Manager to change your name.", status=403)

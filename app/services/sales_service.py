@@ -1,9 +1,9 @@
 """The centerpiece of I3 (contracts.md §6). POST /sales must be one atomic transaction covering
-the sale record, line items, stock movement posting, voucher redemption, and outbox evidence —
+the sale record, line items, stock movement posting, voucher redemption, and outbox evidence:
 @atomic() rolls back all of it on any failure, so a partial sale can never exist.
 """
 from datetime import datetime, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 
 from tortoise.transactions import atomic
 
@@ -25,7 +25,7 @@ from app.models import (
 )
 from app.schemas.sales import SaleCreateRequest
 from app.schemas.types import money_str
-from app.services import discount_approval_service, gift_voucher_service, media_service, members_service
+from app.services import discount_approval_service, gift_voucher_service, media_service, members_service, sale_rules, sell_levels
 
 DISCOUNT_LIMIT_PERCENT = Decimal("5")
 # Payments that always need the customer's name and mobile number, and make them a member.
@@ -39,12 +39,17 @@ ZERO = Decimal("0")
 
 
 class SaleError(Exception):
-    def __init__(self, message: str):
+    def __init__(self, message: str, status: int = 400):
         self.message = message
+        self.status = status
+
+
+# A bill that would sell at a loss is refused whatever approval came with it: nobody can override the floor.
+LOSS = 409
 
 
 # Until this branch server has been verified it has no identity, and an invoice has to be numbered
-# something. `BR` is deliberately not a real branch's code — a bill printed before setup is a bill
+# something. `BR` is deliberately not a real branch's code: a bill printed before setup is a bill
 # that should be obvious as such, rather than one quietly filed under whichever branch the software
 # was written in.
 UNVERIFIED_PREFIX = "BR"
@@ -56,7 +61,7 @@ async def invoice_prefix() -> str:
     It used to be the literal string "HO". That was the head office assumption baked into the
     numbering: every branch in the chain would have printed bills numbered as if they were Head
     Office, and two branches' invoice numbers would have collided the moment a second one opened.
-    A branch is a branch — its bills carry its own code.
+    A branch is a branch: its bills carry its own code.
     """
     from app.services import registration_service
 
@@ -73,7 +78,7 @@ async def peek_next_invoice_number() -> str:
 
 
 def _invoice_year() -> int:
-    """The branch's own trading year, not the server's UTC one — Pakistan is UTC+5, so a sale rung
+    """The branch's own trading year, not the server's UTC one: Pakistan is UTC+5, so a sale rung
     at half past nine in the evening on 31 December is still last year's bill."""
     return today_pk().year
 
@@ -178,8 +183,27 @@ async def _tender_details(payload: SaleCreateRequest) -> dict[str, dict]:
 
 
 def _line_gross(line, unit_price: Decimal) -> Decimal:
+    """What the line is worth before any discount, signed. A pack or box line is so many packs or boxes at their price."""
     sign = Decimal("-1") if line.isReturn else Decimal("1")
+    if getattr(line, "level", None):
+        return sign * line.levelQty * line.levelPrice
     return sign * line.qty * unit_price
+
+
+def _own_price(line, product: Product, wholesale_pct: Decimal) -> bool:
+    """Is this line at one of the Item's own prices: its sale price, or its wholesale price (its own, else the sale price
+    less the branch's wholesale discount, to the rupee, as the till works it out)? An Item already priced below cost
+    still sells at its own price; any other price below cost is refused."""
+    wholesale = product.wholesale_price if product.wholesale_price is not None else (
+        product.price * (Decimal("100") - wholesale_pct) / Decimal("100")
+    ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    if line.level:
+        prices = {sell_levels.own_price(product, line.level), sell_levels.wholesale_price(product, line.level, Decimal(wholesale))}
+        price = Decimal(line.levelPrice)
+    else:
+        prices = {Decimal(product.price), Decimal(wholesale)}
+        price = Decimal(line.unitPrice)
+    return price.quantize(Decimal("0.01")) in {Decimal(p).quantize(Decimal("0.01")) for p in prices if p is not None}
 
 
 def _item_disc(line, product: Product, alias: ProductAlias | None) -> Decimal:
@@ -189,9 +213,58 @@ def _item_disc(line, product: Product, alias: ProductAlias | None) -> Decimal:
         percent, flat, flat_units = alias.disc_percent, alias.disc_flat, line.qty / alias.qty
     else:
         percent, flat, flat_units = product.disc_percent, product.disc_flat, line.qty
-    amount = line.qty * line.unitPrice * (percent or ZERO) / Decimal("100") + flat_units * (flat or ZERO)
+    value = abs(_line_gross(line, line.unitPrice))
+    amount = value * (percent or ZERO) / Decimal("100") + flat_units * (flat or ZERO)
     # Never more than the line is worth.
-    return sign * min(amount, line.qty * line.unitPrice)
+    return sign * min(amount, value)
+
+
+async def returned_on_bills(sale: SaleRecord, product_id: str) -> Decimal:
+    """How much of an Item later bills took back as return lines naming this bill (Billing's return mode), in stocked
+    units. The Returns screen counts these as already returned too."""
+    rows = await SaleLine.filter(is_return=True, return_of_invoice=sale.invoice_number, product_id=product_id).values_list("qty", flat=True)
+    return sum((Decimal(str(q)) for q in rows), ZERO)
+
+
+async def _check_return_line(line, product: Product, lines, products: dict[str, Product]) -> str:
+    """The bill number a return line's goods came from, once it is proven: the bill exists, sold this Item, has this
+    much of it left to return (after the Returns screen, earlier bills and this one), and is inside the Item's return
+    window. SaleError otherwise, in the words the cashier needs."""
+    from app.models import ReturnLine
+    from app.services import return_window_service
+
+    invoice = (line.returnOf or "").strip().upper()
+    if not invoice:
+        raise SaleError(f"{product.name} is coming back: scan or type the number of the bill it was bought on.")
+    sale = await SaleRecord.get_or_none(invoice_number=invoice)
+    if not sale:
+        raise SaleError(f"Bill {invoice} isn't on this branch's records. Check the number on the customer's bill.")
+    sold = sum((Decimal(str(q)) for q in await SaleLine.filter(sale_id=sale.id, product_id=product.id, is_return=False).values_list("qty", flat=True)), ZERO)
+    if sold <= 0:
+        raise SaleError(f"{product.name} isn't on bill {invoice}, so it can't come back against it.")
+    try:
+        await return_window_service.refuse_outside_window(sale.at, [product], invoice)
+    except return_window_service.ReturnWindowError as exc:
+        raise SaleError(exc.message) from exc
+    already = sum((Decimal(str(q)) for q in await ReturnLine.filter(return_record__against_id=sale.id, product_id=product.id).values_list("qty", flat=True)), ZERO)
+    already += await returned_on_bills(sale, product.id)
+    on_this_bill = sum(
+        (l.qty for l in lines if l.isReturn and l.productId == product.id and (l.returnOf or "").strip().upper() == invoice), ZERO,
+    )
+    left = sold - already
+    if on_this_bill > left + Decimal("0.0005"):
+        from app.services import stock_guard
+
+        per_unit = sell_levels.pieces_per_unit(product)
+
+        def say(q: Decimal) -> str:
+            return stock_guard.pieces_text(product, sell_levels.pieces_of(q, per_unit)) if per_unit else stock_guard.qty_text(q)
+
+        raise SaleError(
+            f"Only {say(max(left, ZERO))} of {product.name} is left to return on bill {invoice} "
+            f"({say(already)} already came back of {say(sold)} bought)."
+        )
+    return invoice
 
 
 @atomic()
@@ -200,7 +273,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
     # retried request (lost response, double-click) returns the already-committed sale instead
     # of re-running credit-limit checks, re-posting stock movements, or re-redeeming a voucher.
     # Note: this closes the common case (a delayed/lost-response retry after the first request
-    # already committed) but not a true simultaneous double-fire — two requests with the same
+    # already committed) but not a true simultaneous double-fire: two requests with the same
     # key landing in the same instant could both pass this check before either commits, and the
     # second would then fail on the column's unique constraint rather than returning the first
     # sale gracefully. Acceptable for now (a single till/cashier submitting sequentially can't
@@ -213,7 +286,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
 
     if not payload.lines:
         raise SaleError("A sale needs at least one line")
-    # The bill goes into the drawer the person ringing it has open — that is what makes each counter
+    # The bill goes into the drawer the person ringing it has open: that is what makes each counter
     # reconcile on its own.
     from app.services import till_service
 
@@ -242,6 +315,49 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
             if alias:
                 aliases[index] = alias
 
+    # A line sold loose (pieces, strips) or together (packs, boxes): the server works out the stocked units it is, which
+    # is what stock, cost of sale and the floor count, and the price of one unit, for the reports that count units
+    # (services/sell_levels.py). A loose line's pieces are kept aside for moving stock a whole number of pieces at a time.
+    loose_pieces: dict[int, int] = {}
+    for line in payload.lines:
+        if not line.level:
+            continue
+        product = products[line.productId]
+        if not sell_levels.sells_as(product, line.level):
+            raise SaleError(f"{product.name} isn't sold by the {line.level}. Take the line off and scan it again.")
+        if line.levelQty is None or line.levelQty <= 0 or line.levelQty != line.levelQty.to_integral_value():
+            raise SaleError(f"{product.name}: a {line.level} line needs a whole number of {line.level}es." if line.level == "box"
+                            else f"{product.name}: a {line.level} line needs a whole number of {line.level}s.")
+        if line.levelPrice is None or line.levelPrice < 0:
+            raise SaleError(f"{product.name}: the {line.level} price is missing. Take the line off and scan it again.")
+        line.qty = sell_levels.units_for(product, line.level, line.levelQty)
+        line.unitPrice = sell_levels.unit_price(line.levelQty * line.levelPrice, line.qty)
+        if line.level in sell_levels.LOOSE:
+            loose_pieces[id(line)] = int(line.levelQty) * sell_levels.pieces_in(product, line.level)
+
+    # A return line names the bill its goods came from: the Item has to be on that bill with that much not taken back
+    # already, and still inside its department's return window. Nobody overrides the window at the counter.
+    returns_of: dict[int, str] = {}
+    for line in payload.lines:
+        if line.isReturn:
+            returns_of[id(line)] = await _check_return_line(line, products[line.productId], payload.lines, products)
+
+    # Pharmacy Items go on a bill only from people who may sell them. Someone else can still take payment for a bill
+    # pharmacy staff held, up to the pharmacy lines it carried (the pass recalling it handed them).
+    from app.services import pharmacy_service
+
+    pharmacy_departments = await pharmacy_service.departments()
+    if any(pharmacy_service.is_pharmacy(p, pharmacy_departments) for p in products.values()) and not await pharmacy_service.may_sell(cashier):
+        try:
+            allowed = pharmacy_service.verify_pass(payload.pharmacyPass, cashier, payload.clientRequestId)
+        except pharmacy_service.PharmacyError as exc:
+            raise SaleError(exc.message, status=403) from exc
+        refused = pharmacy_service.over_pass(payload.lines, products, pharmacy_departments, allowed)
+        if refused:
+            raise SaleError(
+                f"Only pharmacy staff can sell {refused}. Ask them to ring it up, or take it off this bill.", status=403,
+            )
+
     # Empty means empty: every Item on the bill must be in stock for its whole quantity. What this same bill takes back
     # (an exchange) is back on the shelf first, so it counts.
     from app.services import stock_guard
@@ -251,49 +367,102 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
     for line in payload.lines:
         bucket = taken_back if line.isReturn else wanted
         bucket[line.productId] = bucket.get(line.productId, ZERO) + line.qty
-    if wanted:
+    # Someone allowed to "Sell when stock shows zero" sells what the shelf holds but the records don't yet: what is missing
+    # comes off Main Store below zero, and the Item shows on Sold without stock until its delivery is received.
+    past_zero = await stock_guard.may_sell_past_zero(cashier)
+    if wanted and not past_zero:
         held = await stock_guard.on_hand(list(wanted))
         short = []
         for pid, qty in wanted.items():
             have = held.get(pid, ZERO) + taken_back.get(pid, ZERO)
+            per_unit = sell_levels.pieces_per_unit(products[pid])
+            if per_unit:
+                # An Item sold loose is counted in whole pieces, so lines of a few pieces each add up exactly.
+                need = sum(
+                    (loose_pieces[id(l)] if id(l) in loose_pieces else sell_levels.pieces_of(l.qty, per_unit))
+                    for l in payload.lines if l.productId == pid and not l.isReturn
+                )
+                back = sum(
+                    (loose_pieces[id(l)] if id(l) in loose_pieces else sell_levels.pieces_of(l.qty, per_unit))
+                    for l in payload.lines if l.productId == pid and l.isReturn
+                )
+                have_pieces = sell_levels.pieces_of(held.get(pid, ZERO), per_unit) + back
+                if have_pieces < need:
+                    short.append(f"{products[pid].name} ({stock_guard.pieces_text(products[pid], max(have_pieces, 0))} in stock, "
+                                 f"{stock_guard.pieces_text(products[pid], need)} on the bill)")
+                continue
             if have < qty:
                 short.append(f"{products[pid].name} ({stock_guard.qty_text(have)} in stock, {stock_guard.qty_text(qty)} on the bill)")
         if short:
             raise SaleError("Not enough stock: " + "; ".join(short) + ". Lower the quantity or take the Item off the bill.")
 
     gross = sum((_line_gross(l, l.unitPrice) for l in payload.lines), ZERO)
-    # The Item's own discount comes first and needs no one's approval — it's set on the Item. A line
+    # The Item's own discount comes first and needs no one's approval: it's set on the Item. A line
     # rung up by a pack barcode takes that pack's discount instead (flat is per pack).
-    item_discs = [_item_disc(l, products[l.productId], aliases.get(i)) for i, l in enumerate(payload.lines)]
-    # A bill-wide discount never touches an Item with Lock Discount set.
-    after_item = [_line_gross(l, l.unitPrice) - d for l, d in zip(payload.lines, item_discs)]
-    discountable = sum((v for l, v in zip(payload.lines, after_item) if not products[l.productId].lock_disc), ZERO)
-    if (payload.discPercent > 0 or payload.flatDisc > 0) and discountable <= 0:
-        if all(products[l.productId].lock_disc for l in payload.lines):
-            raise SaleError("Every Item on this bill has its discount locked, so no bill discount can be given.")
+    raw_item_discs = [_item_disc(l, products[l.productId], aliases.get(i)) for i, l in enumerate(payload.lines)]
+    # No discount sells at a loss (services/sale_rules.py): the Item's own discount stops at its floor, an Item already
+    # priced at or below cost takes none, and a bill discount (never on Lock Discount Items or on what the bill takes
+    # back) is shared by the profit each line has left.
+    wholesale_pct = (await masters_service.pricing_stock())["wholesaleDiscountPercent"]
+    bill = sale_rules.figures(
+        [
+            sale_rules.LineIn(
+                name=products[l.productId].name, is_return=l.isReturn, gross=abs(_line_gross(l, l.unitPrice)), item_disc=abs(d),
+                tax_rate=products[l.productId].tax_rate, qty=l.qty, avg_cost=products[l.productId].avg_cost,
+                locked=products[l.productId].lock_disc, own_price=_own_price(l, products[l.productId], wholesale_pct),
+            )
+            for l, d in zip(payload.lines, raw_item_discs)
+        ],
+        payload.discPercent, payload.flatDisc,
+    )
+    if (payload.discPercent > 0 or payload.flatDisc > 0) and bill.discountable <= 0:
+        sold = [products[l.productId] for i, l in enumerate(payload.lines) if not l.isReturn and not bill.below_cost[i]]
+        if sold and all(p.lock_disc for p in sold):
+            raise SaleError("Every Item this bill sells has its discount locked, so no bill discount can be given.")
+        if any(bill.below_cost):
+            raise SaleError(
+                "What this bill sells is already priced at or below what it cost the shop, so it can't take a discount. Take the discount off.",
+                status=LOSS,
+            )
         raise SaleError("Nothing on this bill is being sold, so there's nothing for a bill discount to come off. Take the discount off.")
-    percent_disc = discountable * payload.discPercent / Decimal("100")
-    bill_disc = percent_disc + payload.flatDisc
-    line_discs = [
-        item_disc + (
-            ZERO if products[l.productId].lock_disc or discountable == 0
-            else value * payload.discPercent / Decimal("100") + payload.flatDisc * (value / discountable)
-        )
-        for l, item_disc, value in zip(payload.lines, item_discs, after_item)
-    ]
+    item_discs = [(-d if l.isReturn else d) if d else ZERO for l, d in zip(payload.lines, bill.item_discs)]
+    bill_disc = bill.bill_disc
+    line_discs = [(-d if l.isReturn else d) if d else ZERO for l, d in zip(payload.lines, bill.line_discs)]
     disc_total = sum(item_discs, ZERO) + bill_disc
+
+    # No discount sells at a loss, whoever approved what.
+    if bill.refused:
+        name, fetches, floor = bill.refused[0]
+        raise SaleError(
+            f"{name} is on this bill at {sale_rules.rs(fetches)} with tax, less than it cost the shop ({sale_rules.rs(floor)}), "
+            "and that isn't its own price. Take it off and ring it up again at its price.",
+            status=LOSS,
+        )
+    if bill_disc > bill.max_bill_disc + sale_rules.TOLERANCE:
+        most = bill.max_bill_disc.quantize(Decimal("1"), rounding=ROUND_FLOOR)
+        raise SaleError(
+            f"A discount of {sale_rules.rs(bill_disc)} would sell this bill below what its Items cost the shop. "
+            f"The most discount it can take is {sale_rules.rs(most)}. Lower the discount.",
+            status=LOSS,
+        )
 
     gst = sum(
         ((_line_gross(l, l.unitPrice) - line_disc) * products[l.productId].tax_rate / Decimal("100"))
         for l, line_disc in zip(payload.lines, line_discs)
     )
     grand_total = gross - disc_total + payload.fare + gst
+    if grand_total < 0:
+        raise SaleError(
+            "This bill comes to less than nothing, so it can't be paid. Give the refund from Returns, or add what the customer is taking.",
+            status=LOSS,
+        )
     net_value = grand_total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
     # Only the salesperson's own bill discount counts against their authority. An Item's discount was
     # decided when the Item was set up, and asking a manager to re-approve it on every sale would
-    # train everyone to click through the approval.
-    effective_pct = (bill_disc / gross * Decimal("100")) if gross > 0 else ZERO
+    # train everyone to click through the approval. It is measured on the margin the floors leave, not on the price:
+    # a 10% limit gives away a tenth of the profit left in the bill.
+    effective_pct = bill.authority_percent()
     override_user = None
     from app.services.rbac_service import discount_limit_of
 
@@ -301,9 +470,10 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
     if effective_pct > own_limit + discount_approval_service.PERCENT_TOLERANCE:
         if not payload.discountApprovalToken:
             raise SaleError(
-                f"Discount {effective_pct:.1f}% is more than your {own_limit.normalize():f}% limit, so someone with a higher limit needs to approve it"
+                f"This discount is {effective_pct:.1f}% of the profit on the bill, more than your {own_limit.normalize():f}% limit, "
+                "so someone with a higher limit needs to approve it"
             )
-        # A signed approval from POST /sales/discount-approvals, never a bare user id — see
+        # A signed approval from POST /sales/discount-approvals, never a bare user id: see
         # discount_approval_service for what the old id-on-trust check let a salesperson do.
         try:
             override_user = await discount_approval_service.verify(
@@ -317,7 +487,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
         raise SaleError(f"Payment not covered. Still to pay: {money_str(net_value - received)}")
     cash_back = max(ZERO, received - net_value)
 
-    # Members and points. Earned on what the customer actually paid — never on what points paid for.
+    # Members and points. Earned on what the customer actually paid: never on what points paid for.
     details = await _tender_details(payload)
     member = await _resolve_member(payload, party, cashier)
     loyalty = await members_service.settings()
@@ -350,7 +520,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
     is_credit_sale = credit_amount > 0
 
     # Credit-limit enforcement (previously: creditBalance was seeded but never checked or
-    # updated anywhere — legacy's "Check Balance Limit" had no equivalent at all).
+    # updated anywhere: legacy's "Check Balance Limit" had no equivalent at all).
     if is_credit_sale:
         if not party.credit_allowed:
             raise SaleError(f"{party.name} is not allowed credit sales")
@@ -392,6 +562,9 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
         await SaleLine.create(
             sale=sale, product=product, qty=line.qty, unit_price=line.unitPrice, is_return=line.isReturn,
             alias_code=aliases[index].code if index in aliases else None,
+            sell_level=line.level, level_qty=line.levelQty if line.level else None, level_price=line.levelPrice if line.level else None,
+            return_of_invoice=returns_of.get(id(line)),
+            level_detail=sell_levels.detail(product, line.level) if line.level else None,
             disc_amount=line_disc.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             unit_cost=product.avg_cost,
             tax_amount=((_line_gross(line, line.unitPrice) - line_disc) * product.tax_rate / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
@@ -402,11 +575,20 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
     now = datetime.now(timezone.utc)
     for line in sorted(payload.lines, key=lambda l: not l.isReturn):
         product = products[line.productId]
+        per_unit = sell_levels.pieces_per_unit(product)
         if line.isReturn:
-            await StockMovement.create(product=product, location=location, kind="return", qty=line.qty, origin_user=cashier, at=now, unit_cost=product.avg_cost)
+            # Loose pieces go back as pieces, keeping Main Store's figure a whole number of them.
+            qty = await stock_guard.return_pieces(product, loose_pieces[id(line)], per_unit) if id(line) in loose_pieces else line.qty
+            await StockMovement.create(product=product, location=location, kind="return", qty=qty, origin_user=cashier, at=now, unit_cost=product.avg_cost)
             continue
-        for place, qty in await stock_guard.plan_sale(product, line.qty):
-            await StockMovement.create(product=product, location=place, kind="sell", qty=-qty, origin_user=cashier, at=now, unit_cost=product.avg_cost)
+        plan = (
+            await stock_guard.plan_pieces(product, loose_pieces[id(line)], per_unit, past_zero=past_zero) if id(line) in loose_pieces
+            else await stock_guard.plan_sale(product, line.qty, past_zero=past_zero)
+        )
+        for place, qty, reason in plan:
+            await StockMovement.create(
+                product=product, location=place, kind="sell", qty=-qty, reason=reason, origin_user=cashier, at=now, unit_cost=product.avg_cost,
+            )
 
     for code, amount in payload.tenders.items():
         if amount > 0:
@@ -428,6 +610,11 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
             await gift_voucher_service.redeem(payload.voucherCode, voucher_amount, invoice_number, str(party.id))
         except gift_voucher_service.VoucherError as exc:
             raise SaleError(exc.message) from exc
+
+    # Scan history: the lines still open on this bill were sold.
+    from app.services import scan_history_service
+
+    await scan_history_service.mark_sold(payload.clientRequestId, invoice_number)
 
     await OutboxEvent.create(
         aggregate_type="SaleRecord",
@@ -453,7 +640,7 @@ async def find_by_invoice(invoice_number: str) -> SaleRecord | None:
 async def list_sales(
     from_at: datetime | None, to_at: datetime | None, limit: int, offset: int
 ) -> tuple[list[SaleRecord], int]:
-    """Branch-wide, not terminal-scoped — the read path X/Z, the Dashboard and Reports need
+    """Branch-wide, not terminal-scoped: the read path X/Z, the Dashboard and Reports need
     instead of each browser's own local sales journal."""
     qs = SaleRecord.all()
     if from_at:

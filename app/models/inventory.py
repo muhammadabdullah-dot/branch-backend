@@ -49,6 +49,28 @@ async def balance_for(product_id: str, location_id: str | None = None):
     return total if total is not None else Decimal("0")
 
 
+# The one way below zero: a sale by someone allowed to "Sell when stock shows zero", from Main Store, marked with this
+# reason (services/stock_guard.py plan_sale). Shown as it is on the Movements screen.
+PAST_ZERO_REASON = "Sold past zero"
+SELL_PAST_ZERO_RESOURCE = "store.sell-past-zero"
+SELLING_LOCATION_ID = "loc-1"
+
+
+async def _sold_past_zero_by_permitted_user(instance: "StockMovement", using_db) -> bool:
+    """Narrow on purpose: only a sale, only from Main Store, only marked as sold past zero, only by a person who holds the
+    tick. Supplier returns, adjustments, counts, transfers and moves between locations never qualify."""
+    if instance.kind != "sell" or instance.reason != PAST_ZERO_REASON or instance.location_id != SELLING_LOCATION_ID:
+        return False
+    if not instance.origin_user_id:
+        return False
+    from app.models.permission import UserPermission
+
+    qs = UserPermission.filter(user_id=instance.origin_user_id, resource=SELL_PAST_ZERO_RESOURCE, can_execute=True)
+    if using_db is not None:
+        qs = qs.using_db(using_db)
+    return await qs.exists()
+
+
 class StockBelowZero(Exception):
     """A movement that would leave a location holding less than nothing. Shown to the person as it is (409)."""
 
@@ -69,6 +91,8 @@ async def _never_below_zero(sender, instance: StockMovement, using_db, update_fi
     rows = await qs.annotate(total=Sum("qty")).values_list("total", flat=True)
     held = Decimal(str(rows[0])) if rows and rows[0] is not None else Decimal("0")
     if held + Decimal(str(instance.qty)) < Decimal("-0.0005"):
+        if await _sold_past_zero_by_permitted_user(instance, using_db):
+            return
         from app.models.catalog import Product
         from app.models.location import Location
 
@@ -78,4 +102,7 @@ async def _never_below_zero(sender, instance: StockMovement, using_db, update_fi
         where = location.name if location else "This location"
         have = format(held.quantize(Decimal("0.001")).normalize(), "f")
         need = format((-Decimal(str(instance.qty))).quantize(Decimal("0.001")).normalize(), "f")
+        if held < 0:
+            short = format((-held).quantize(Decimal("0.001")).normalize(), "f")
+            raise StockBelowZero(f"{where} is already {short} short of {name} (sold before its delivery was entered), so {need} can't be taken. Nothing was saved.")
         raise StockBelowZero(f"{where} holds {have} of {name}, not enough to take {need}. Stock can't go below zero, so nothing was saved.")

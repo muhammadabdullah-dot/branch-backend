@@ -20,6 +20,7 @@ async def _to_out(po: PurchaseOrder) -> PurchaseOrderOut:
             productId=str(line.product_id), productName=line.product.name, productSku=line.product.sku,
             qty=line.qty, unitPrice=line.unit_price, discPercent=line.disc_percent,
             receivedQty=line.received_qty, remainingQty=max(Decimal("0"), line.qty - line.received_qty),
+            needsDetails=bool(getattr(line.product, "needs_details", False)),
         ))
     return PurchaseOrderOut(
         id=str(po.id), poNumber=po.po_number, supplierId=str(po.supplier_id), supplierName=po.supplier.name,
@@ -78,3 +79,32 @@ async def cancel(user: User, po_id: str) -> PurchaseOrderOut:
         return await _to_out(await purchase_order_service.cancel(user, po_id))
     except purchase_order_service.PurchaseOrderError as exc:
         _raise(exc)
+
+
+async def suggestions(supplier_id: str | None, cover_days: int, exclude_order_id: str | None):
+    from decimal import ROUND_HALF_UP
+
+    from app.schemas.purchase_orders import SuggestionLineOut, SuggestionsOut
+
+    try:
+        found = await purchase_order_service.suggestions(supplier_id, cover_days, exclude_order_id)
+    except purchase_order_service.PurchaseOrderError as exc:
+        _raise(exc)
+    return SuggestionsOut(
+        supplierId=found["supplierId"], supplierName=found["supplierName"], coverDays=found["coverDays"],
+        salesDays=found["salesDays"], count=found["count"], rule=found["rule"],
+        lines=[
+            SuggestionLineOut(**{**l, "ratePerDay": Decimal(l["ratePerDay"]).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)})
+            for l in found["lines"]
+        ],
+    )
+
+
+async def add_by_hand(user: User, data):
+    from app.controllers.catalog_controller import _to_out
+
+    try:
+        product = await purchase_order_service.add_by_hand(user, data.name, data.unit, data.cost, data.price, data.sku)
+    except purchase_order_service.PurchaseOrderError as exc:
+        _raise(exc)
+    return _to_out(product)
