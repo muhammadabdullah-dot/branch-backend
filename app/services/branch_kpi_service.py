@@ -16,9 +16,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 from app.core.pk_time import pk_day, pk_time
 from app.services import branch_analytics_service as an
+from app.services import pharmacy_service
 from app.services.branch_analytics_service import (
     SQL_DAY,
     SQL_HOUR,
@@ -171,6 +173,9 @@ class Ctx:
     group: str | None = None
     invoice: str | None = None
     path: list[str] = field(default_factory=list)
+    # A reader who doesn't sell Pharmacy Items (a Salesperson with this tick): a bill's Pharmacy Items reach them as one
+    # line, never by name (services/pharmacy_service.py).
+    hide_pharmacy: bool = False
     _users: dict | None = None
     _names: dict = field(default_factory=dict)
 
@@ -628,7 +633,7 @@ async def tender_rows(period: Period, day: date | None = None, user_id: str | No
 # ── one figure opened up ────────────────────────────────────────────────────────────────────────
 
 async def detail(kpi_id: str, period: Period, root: str | None, day: str | None, product_id: str | None, user_id: str | None,
-                 group_kind: str | None, group: str | None, invoice: str | None, path: str | None) -> dict:
+                 group_kind: str | None, group: str | None, invoice: str | None, path: str | None, viewer=None) -> dict:
     if kpi_id not in KPIS:
         raise AnalysisError("That figure isn't one this branch has. Go back to the dashboard and pick it from there.")
     if group_kind and group_kind not in an.GROUP_COLUMNS:
@@ -638,6 +643,7 @@ async def detail(kpi_id: str, period: Period, root: str | None, day: str | None,
         day=an.parse_day(day, "day") if day else None, product_id=product_id or None, user_id=user_id or None,
         group_kind=group_kind or None, group=group if group not in (None, "") else None, invoice=(invoice or "").strip().upper() or None,
         path=[s for s in (path or "").split(".") if s in STEP_KEYS],
+        hide_pharmacy=pharmacy_service.hides_pharmacy(viewer),
     )
     if ctx.group is not None and not ctx.group_kind:
         ctx.group_kind = "department"
@@ -1392,7 +1398,7 @@ async def _bill(ctx: Ctx) -> dict:
                CAST(s.gross AS REAL) AS gross, CAST(s.disc_total AS REAL) AS discount, CAST(s.fare AS REAL) AS fare, CAST(s.gst AS REAL) AS gst,
                CAST(s.net_value AS REAL) AS total, CAST(s.received AS REAL) AS received, CAST(s.cash_back AS REAL) AS cash_back,
                s.fbr_invoice_number AS fbr, s.earned_points AS points, s.points_redeemed AS redeemed, s.till_session_id AS till_id,
-               pa.name AS party, pa.code AS party_code, pa.is_walk_in AS walk_in, m.name AS member
+               pa.name AS party, pa.code AS party_code, pa.is_walk_in AS walk_in, m.name AS member, s.slips AS slips
         FROM sale_records s LEFT JOIN parties pa ON pa.id = s.party_id LEFT JOIN members m ON m.id = s.member_id
         WHERE s.invoice_number = ?
     """, [ctx.invoice])
@@ -1413,21 +1419,45 @@ async def _bill(ctx: Ctx) -> dict:
     lines = await q("""
         SELECT sl.product_id AS product_id, p.name AS name, p.sku AS sku, CAST(sl.qty AS REAL) AS qty, CAST(sl.unit_price AS REAL) AS price,
                sl.is_return AS is_return, CAST(sl.disc_amount AS REAL) AS disc, CAST(sl.tax_amount AS REAL) AS tax,
-               COALESCE(CAST(sl.unit_cost AS REAL), CAST(p.avg_cost AS REAL), 0) AS unit_cost, CAST(p.tax_rate AS REAL) AS tax_rate
+               COALESCE(CAST(sl.unit_cost AS REAL), CAST(p.avg_cost AS REAL), 0) AS unit_cost, CAST(p.tax_rate AS REAL) AS tax_rate,
+               p.department AS department
         FROM sale_lines sl JOIN products p ON p.id = sl.product_id WHERE sl.sale_id = ?
     """, [s["id"]])
     bill_day = datetime_day(s["at"])
+    unseen = {d.upper() for d in await pharmacy_service.departments()} if ctx.hide_pharmacy else set()
+    slips = _json_list(s.get("slips"))
     out_lines = []
+    folded: dict | None = None
     for l in lines:
         sign = -1 if l["is_return"] else 1
         value = sign * l["qty"] * l["price"]
         disc = l["disc"] if l["disc"] is not None else (s["discount"] * value / s["gross"] if s["gross"] else 0)
         tax = l["tax"] if l["tax"] is not None else (value - disc) * f(l["tax_rate"]) / 100
+        if (l["department"] or "").strip().upper() in unseen:
+            # The bill's Pharmacy Items as one line, at what they came to.
+            if folded is None:
+                folded = {"count": 0, "value": 0.0, "disc": 0.0, "tax": 0.0, "profit": 0.0, "at": len(out_lines)}
+                out_lines.append({})
+            folded["count"] += 1
+            folded["value"] += value
+            folded["disc"] += disc
+            folded["tax"] += tax
+            folded["profit"] += value - disc - sign * l["qty"] * l["unit_cost"]
+            continue
         out_lines.append({
             "productId": str(l["product_id"]), "day": bill_day.isoformat() if bill_day else None, "item": l["name"] + (" (handed back)" if l["is_return"] else ""),
             "sku": l["sku"], "qty": units(sign * l["qty"]), "price": money(l["price"]), "discount": money(disc), "sales": money(value - disc),
             "gst": money(tax), "lineTotal": money(value - disc + tax), "profit": money(value - disc - sign * l["qty"] * l["unit_cost"]),
         })
+    if folded is not None:
+        worth = folded["value"] - folded["disc"] + folded["tax"]
+        out_lines[folded["at"]] = {
+            "productId": None, "day": bill_day.isoformat() if bill_day else None,
+            "item": pharmacy_service.folded_name(slips, folded["count"], Decimal(str(round(worth, 2)))),
+            "sku": ", ".join(pharmacy_service.slip_numbers(slips)), "qty": units(1), "price": money(folded["value"]),
+            "discount": money(folded["disc"]), "sales": money(folded["value"] - folded["disc"]), "gst": money(folded["tax"]),
+            "lineTotal": money(worth), "profit": money(folded["profit"]),
+        }
     tenders = await q("""
         SELECT COALESCE(m.name, t.code) AS name, t.code AS code, CAST(t.amount AS REAL) AS amount, t.reference AS reference,
                t.transaction_id AS txn, t.account AS account
@@ -1439,7 +1469,7 @@ async def _bill(ctx: Ctx) -> dict:
         tender_rows_out.append({"name": "Change given", "amount": money(-f(s["cash_back"])), "reference": "-"})
     refunds = await q("""
         SELECT r.id AS rid, r.at AS at, r.cashier_id AS user_id, r.refund_method AS method, CAST(r.refund_total AS REAL) AS total, r.note AS note,
-               rl.product_id AS product_id, p.name AS item, CAST(rl.qty AS REAL) AS qty,
+               rl.product_id AS product_id, p.name AS item, CAST(rl.qty AS REAL) AS qty, p.department AS department,
                CAST(rl.qty AS REAL) * CAST(rl.unit_price AS REAL) AS value
         FROM return_records r LEFT JOIN return_lines rl ON rl.return_record_id = r.id LEFT JOIN products p ON p.id = rl.product_id
         WHERE r.against_id = ? ORDER BY r.at
@@ -1480,13 +1510,27 @@ async def _bill(ctx: Ctx) -> dict:
                                                   col("method", "Paid back as"), col("item", "Item", link="item", params=ITEM_LINK, carry=False),
                                                   col("qty", "Units", "number"), col("value", "Value", "money"), col("total", "Refund total", "money")],
                     [{"at": iso_at(r["at"]), "userId": str(r["user_id"]), "person": users.get(str(r["user_id"]), "-"), "method": (r["method"] or "").capitalize(),
-                      "productId": str(r["product_id"]) if r["product_id"] else None, "item": r["item"] or "-", "qty": units(r["qty"]),
-                      "value": money(r["value"]), "total": money(r["total"])} for r in refunds],
+                      **({"productId": None, "item": "A pharmacy Item"} if (r["department"] or "").strip().upper() in unseen
+                         else {"productId": str(r["product_id"]) if r["product_id"] else None, "item": r["item"] or "-"}),
+                      "qty": units(r["qty"]), "value": money(r["value"]), "total": money(r["total"])} for r in refunds],
                     "Nothing has come back against this bill."),
         ],
         notes=["Sales on a line are after its discount and before GST; the line total adds the GST. Gross profit takes off the line's cost when sold (the Item's average cost for older bills).",
                "Value on a return is units times what the customer paid for each, GST included."],
     )
+
+
+def _json_list(value) -> list:
+    """A JSON column as SQL hands it back: text, already parsed, or nothing."""
+    import json
+
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value) if value else []
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 VIEWS = {

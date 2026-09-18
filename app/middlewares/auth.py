@@ -57,11 +57,15 @@ def access_name(resource: str, action: str) -> str | None:
     return next((label for _, r, _a, label, _ in ABILITIES if r == resource), None)
 
 
-def refusal(pairs: list[tuple[str, str]]) -> str:
-    from app.core.abilities import MANAGER_ONLY_RESOURCES
+def refusal(pairs: list[tuple[str, str]], user: User | None = None) -> str:
+    from app.core.abilities import MANAGER_ONLY_RESOURCES, PHARMACIST, pharmacist_refusal
 
     if all(resource in MANAGER_ONLY_RESOURCES for resource, _ in pairs):
         return "Only a Branch Manager account can do this."
+    # A Pharmacist never takes money, whatever is ticked: they are told so, not sent to ask for a tick.
+    why = pharmacist_refusal(pairs) if user is not None and user.role_id == PHARMACIST else None
+    if why:
+        return why
     names = list(dict.fromkeys(name for name in (access_name(r, a) for r, a in pairs) if name))
     if not names:
         return "You don't have access to this. Ask your Branch Manager."
@@ -73,7 +77,7 @@ def refusal(pairs: list[tuple[str, str]]) -> str:
 def require_permission(resource: str, action: str):
     async def checker(user: User = Depends(get_current_user)) -> User:
         if not await has_permission(user, resource, action):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, refusal([(resource, action)]))
+            raise HTTPException(status.HTTP_403_FORBIDDEN, refusal([(resource, action)], user))
         return user
 
     return checker
@@ -95,6 +99,6 @@ def require_any_permission(*pairs: tuple[str, str]):
         for resource, action in pairs:
             if await has_permission(user, resource, action):
                 return user
-        raise HTTPException(status.HTTP_403_FORBIDDEN, refusal(list(pairs)))
+        raise HTTPException(status.HTTP_403_FORBIDDEN, refusal(list(pairs), user))
 
     return checker

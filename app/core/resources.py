@@ -47,8 +47,11 @@ RESOURCES: list[str] = [
     # Selling what the shelf holds when the records show none (its delivery isn't entered yet): Main Store goes below zero
     # for that sale only, and the Item shows on Sold without stock. See services/stock_guard.py.
     "store.sell-past-zero",
-    # Putting Pharmacy Items on a bill (which departments are Pharmacy is a branch setting). See services/pharmacy_service.py.
-    "store.pharmacy",
+    # Who puts Pharmacy Items on a bill is not a tick: a Pharmacist sells them, a Salesperson doesn't, a Branch Manager
+    # does both. See services/pharmacy_service.py.
+    # A Pharmacist's pharmacy slips: rung up in Billing and printed, paid on their own at the cash counter. See
+    # services/slips_service.py.
+    "store.slips",
     "inventory.overview",
     "inventory.catalog",
     "inventory.suppliers",
@@ -120,7 +123,7 @@ RBAC_MANAGEMENT_RESOURCE = "branch-console.staff-access"
 
 
 def resources_for_role(role_id: str) -> set[str]:
-    """The resources a starting point (Salesperson, Branch Manager) grants. See core/abilities.py."""
+    """The resources a starting point (Salesperson, Pharmacist, Branch Manager) grants. See core/abilities.py."""
     from app.core.abilities import preset_grants
 
     return set(preset_grants(role_id))
@@ -136,4 +139,4 @@ def excluded_resources_for_role(role_id: str) -> set[str]:
 
 
 # The starting points a new person can be given.
-ROLE_TEMPLATES: dict[str, dict] = {"cashier": {}, "branch-manager": {}}
+ROLE_TEMPLATES: dict[str, dict] = {"cashier": {}, "pharmacist": {}, "branch-manager": {}}

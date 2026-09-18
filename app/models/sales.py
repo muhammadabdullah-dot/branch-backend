@@ -40,6 +40,10 @@ class SaleRecord(models.Model):
     # double stock deduction, double credit-balance increment, double voucher redemption).
     # Optional/nullable: a caller that doesn't send one gets the old, non-idempotent behavior.
     client_request_id = fields.CharField(max_length=80, null=True, unique=True)
+    # Added 2026-09-18. The pharmacy slip this bill is the payment of, and who made it: [{"number": "P-0042",
+    # "pharmacistId": ..., "pharmacistName": ...}]. A list, because bills of the first way could pay several. Null on
+    # every other bill (services/slips_service.py).
+    slips = fields.JSONField(null=True)
 
     class Meta:
         table = "sale_records"

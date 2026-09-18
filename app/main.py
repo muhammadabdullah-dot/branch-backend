@@ -115,6 +115,17 @@ async def _seed() -> None:
     if revised:
         print(f"  staff: {revised} account(s) moved onto per-person access", flush=True)
     await sync_role_labels()
+    from app.services.seed_service import drop_pharmacist_money_ticks, drop_retired_ticks, ensure_roles
+
+    added_roles = await ensure_roles()
+    if added_roles:
+        print(f"  staff: {added_roles} new starting point(s) added", flush=True)
+    dropped = await drop_retired_ticks()
+    if dropped:
+        print(f"  staff: Sell Pharmacy Items taken off {dropped} account(s); the Pharmacist role decides that now", flush=True)
+    unmoneyed = await drop_pharmacist_money_ticks()
+    if unmoneyed:
+        print(f"  staff: payment, till, returns and discount ticks taken off {unmoneyed} Pharmacist(s); they print slips now", flush=True)
     from app.services.seed_service import split_the_books_access
 
     split = await split_the_books_access()

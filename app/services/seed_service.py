@@ -92,10 +92,12 @@ SEED_BATCHES = [
     ("p-6", "NM-0912", 5, "60"),
 ]
 
-# The two starting points for a new person. Nothing else is a role: what anyone can do is ticked on their own
-# account (core/abilities.py). The id stays "cashier" — every permission row and the head office copy use it.
+# The three starting points for a new person. Nothing else is a role: what anyone can do is ticked on their own
+# account (core/abilities.py), and the role decides which Items they sell (services/pharmacy_service.py). The id stays
+# "cashier" — every permission row and the head office copy use it.
 ROLES = [
     ("cashier", "Salesperson", "/store/billing"),
+    ("pharmacist", "Pharmacist", "/store/billing"),
     ("branch-manager", "Branch Manager", "/branch-console/dashboard"),
 ]
 # The fixed roles there used to be; `revise_legacy_roles` moves their people onto per-person access.
@@ -278,6 +280,70 @@ async def sync_role_labels() -> None:
         renamed = await User.filter(name=old).update(name=new)
         if renamed:
             print(f"  renamed {renamed} seeded account(s): {old} -> {new}", flush=True)
+
+
+async def ensure_roles() -> int:
+    """A starting point added after a branch was first set up (Pharmacist) reaches it on its next start, with the
+    software's own standard access for it. `seed_if_empty` only runs on a fresh database. A role already there is left
+    as it is, so running this again changes nothing."""
+    added = 0
+    for role_id, name, landing in ROLES:
+        if await Role.exists(id=role_id):
+            continue
+        role = await Role.create(id=role_id, name=name, landing=landing)
+        for resource, actions in preset_grants(role_id).items():
+            await RoleDefaultPermission.create(role=role, resource=resource, can_read="R" in actions, can_write="W" in actions, can_execute="X" in actions)
+        added += 1
+    return added
+
+
+async def drop_retired_ticks() -> int:
+    """Takes ticks that now stand for nothing (core/abilities.py DROPPED_RESOURCES) off everyone and off every role's
+    standard access. "Sell Pharmacy Items" became the Pharmacist starting point. Anyone changed goes to head office.
+    Finds nothing to do once it has run."""
+    from app.core.abilities import DROPPED_RESOURCES
+    from app.services import staff_sync_service
+
+    gone = list(DROPPED_RESOURCES)
+    user_ids = set(await UserPermission.filter(resource__in=gone).values_list("user_id", flat=True))
+    await UserPermission.filter(resource__in=gone).delete()
+    await RoleDefaultPermission.filter(resource__in=gone).delete()
+    for user_id in user_ids:
+        await staff_sync_service.emit(user_id)
+    return len(user_ids)
+
+
+async def drop_pharmacist_money_ticks() -> int:
+    """A Pharmacist never takes money (core/abilities.py PHARMACIST_NEVER_*): takes payment, the till, returns, gift
+    vouchers, held bills and discounts off every Pharmacist, and off the Pharmacist starting point's standard access.
+    Seeing Billing stays. Anyone changed goes to head office. Finds nothing to do once it has run."""
+    from app.core.abilities import PHARMACIST, never_for
+    from app.services import staff_sync_service
+
+    fields = {"R": "can_read", "W": "can_write", "X": "can_execute"}
+
+    async def strip(row) -> bool:
+        gone = [f for a, f in fields.items() if getattr(row, f) and never_for(PHARMACIST, row.resource, a)]
+        if not gone:
+            return False
+        for f in gone:
+            setattr(row, f, False)
+        if any(getattr(row, f) for f in fields.values()):
+            await row.save(update_fields=gone)
+        else:
+            await row.delete()
+        return True
+
+    changed: set = set()
+    pharmacists = await User.filter(role_id=PHARMACIST).values_list("id", flat=True)
+    for row in await UserPermission.filter(user_id__in=list(pharmacists)):
+        if await strip(row):
+            changed.add(row.user_id)
+    for row in await RoleDefaultPermission.filter(role_id=PHARMACIST):
+        await strip(row)
+    for user_id in changed:
+        await staff_sync_service.emit(user_id)
+    return len(changed)
 
 
 async def sync_role_resource_grants() -> None:

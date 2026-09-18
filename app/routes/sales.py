@@ -49,7 +49,7 @@ async def list_sales(
     offset: int = 0,
     user: User = Depends(_list_read),
 ) -> SaleListOut:
-    return await sales_controller.list_sales(from_, to, limit, offset)
+    return await sales_controller.list_sales(from_, to, limit, offset, user)
 
 
 @router.post("/sales", response_model=SaleRecordOut)
@@ -83,7 +83,7 @@ async def request_discount_approval(
 
 @router.get("/sales/{invoice_number}", response_model=SaleRecordOut)
 async def get_sale(invoice_number: str, user: User = Depends(_lookup_for_sale_or_return)) -> SaleRecordOut:
-    return await sales_controller.get_by_invoice(invoice_number)
+    return await sales_controller.get_by_invoice(invoice_number, user)
 
 
 # Looking first (the preview) isn't a reprint; the POST that sends it to the printer is, and the activity log records
@@ -100,7 +100,7 @@ async def reprint_receipt(invoice_number: str, user: User = Depends(_reprint)) -
 
 @router.post("/returns/quote")
 async def quote_return(payload: ReturnQuoteRequest, user: User = Depends(_returns_write)) -> dict:
-    return await returns_controller.quote(payload)
+    return await returns_controller.quote(payload, user)
 
 
 @router.post("/returns", response_model=ReturnRecordOut)
@@ -111,5 +111,8 @@ async def create_return(payload: ReturnCreateRequest, user: User = Depends(_retu
 # Sold without stock, Priced below cost, the pharmacy setting, scan history and recalling a held bill: their own file,
 # brought in here so app/main.py needs no line for them.
 from app.routes.billing_extras import router as _billing_extras_router  # noqa: E402
+from app.routes.slips import router as _slips_router  # noqa: E402
 
 router.include_router(_billing_extras_router)
+# Pharmacy slips: made by a Pharmacist, paid on their own at the cash counter.
+router.include_router(_slips_router)

@@ -15,14 +15,14 @@ def _to_out(b: HeldBill) -> HeldBillOut:
     )
 
 
-async def list_all() -> list[HeldBillOut]:
-    return [_to_out(b) for b in await held_bills_service.list_all()]
+async def list_all(user=None) -> list[HeldBillOut]:
+    return [_to_out(b) for b in await held_bills_service.list_all(user)]
 
 
 async def hold(data: HeldBillCreate, user=None) -> HeldBillOut:
     return _to_out(await held_bills_service.hold(data, user))
 
 
-async def remove(bill_id: str) -> None:
-    if not await held_bills_service.remove(bill_id):
+async def remove(bill_id: str, user=None) -> None:
+    if not await held_bills_service.remove(bill_id, user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Held bill not found")

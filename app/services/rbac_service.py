@@ -3,7 +3,11 @@ from tortoise.transactions import in_transaction
 
 from decimal import Decimal
 
-from app.core.abilities import AREA_COLUMNS, AREAS, AREAS_GROUP, ABILITIES, GROUPS, PRESETS, normalise, preset_grants, preset_limit
+from app.core.abilities import (
+    AREA_COLUMNS, AREAS, AREAS_GROUP, ABILITIES, BRANCH_MANAGER, COUNTER_RESOURCES, COUNTER_ROLES, GROUPS,
+    NOT_FOR_PHARMACIST, PHARMACIST, PHARMACIST_NOTE, PRESETS, never_for, normalise, preset_grants, preset_limit,
+    without_never,
+)
 from app.core.resources import RESOURCES, excluded_resources_for_role, resources_for_role
 from app.core.security import hash_password
 from app.models import Role, RoleDefaultPermission, User, UserPermission
@@ -17,11 +21,19 @@ def _actions_from_flags(perm: UserPermission) -> list[str]:
 
 
 async def effective_permissions(user: User) -> list[PermissionOut]:
-    rows = await UserPermission.filter(user=user)
-    return [PermissionOut(resource=r.resource, actions=_actions_from_flags(r)) for r in rows if _actions_from_flags(r)]
+    """What the person can do: their ticks, less anything their starting point can never hold (a Pharmacist's money
+    ticks, should head office or an old account still carry them)."""
+    out = []
+    for r in await UserPermission.filter(user=user):
+        actions = [a for a in _actions_from_flags(r) if not never_for(user.role_id, r.resource, a)]
+        if actions:
+            out.append(PermissionOut(resource=r.resource, actions=actions))
+    return out
 
 
 async def has_permission(user: User, resource: str, action: str) -> bool:
+    if never_for(user.role_id, resource, action):
+        return False
     field = _ACTION_FIELDS[action]
     perm = await UserPermission.get_or_none(user=user, resource=resource)
     return bool(perm and getattr(perm, field))
@@ -65,6 +77,9 @@ def abilities_catalog() -> dict:
              "abilities": sorted(f"{r}:{a}" for r, a in p["abilities"])}
             for role_id, p in PRESETS.items()
         ],
+        # The ticks never offered to a Pharmacist, and the line said beside them.
+        "notForPharmacist": NOT_FOR_PHARMACIST,
+        "pharmacistNote": PHARMACIST_NOTE,
     }
 
 
@@ -120,7 +135,7 @@ async def create_user(
         }
     else:
         standard = preset_grants(role_id)
-    standard = {r: a for r, a in standard.items() if r not in excluded_resources_for_role(role_id)}
+    standard = {r: a for r, a in without_never(role_id, standard).items() if r not in excluded_resources_for_role(role_id)}
     limit = discount_limit if discount_limit is not None else preset_limit(role_id)
     await _refuse_beyond_caller(caller, standard, limit)
     async with in_transaction():
@@ -174,6 +189,52 @@ async def update_user(
     return user
 
 
+async def switch_works_as(user_id: str, role_id: str, caller: User) -> tuple[User, str | None] | None:
+    """Moves someone between Salesperson and Pharmacist, which decides which Items they sell at the till and whether they
+    take payment. Their Sales counter ticks start again from the new role's (a Salesperson gets the till back, a
+    Pharmacist gets the slips); every other tick, and their title, stay. Their discount limit stays too, except that a
+    Pharmacist's becomes 0. Nobody is made a Branch Manager this way, and a Branch Manager isn't switched. Returns the
+    person and what they were before (None when nothing changed)."""
+    if role_id not in COUNTER_ROLES:
+        raise RbacError("Someone can be switched to Salesperson or Pharmacist only.", status=422)
+    user = await User.get_or_none(id=user_id)
+    if not user:
+        return None
+    if user.role_id == BRANCH_MANAGER:
+        raise RbacError(f"{user.name} is a Branch Manager, who sells every Item. A Branch Manager isn't switched.", status=403)
+    if user.role_id not in COUNTER_ROLES:
+        raise RbacError(f"{user.name} can't be switched from how they started.", status=403)
+    if user.role_id == role_id:
+        return user, None
+    if not await Role.exists(id=role_id):
+        raise RbacError("This branch doesn't have that role yet. Restart the branch server and try again.", status=409)
+    rows = await UserPermission.filter(user=user)
+    held = {r.resource: set(_actions_from_flags(r)) for r in rows if _actions_from_flags(r)}
+    kept = {r: a for r, a in held.items() if r not in COUNTER_RESOURCES}
+    counter = {r: a for r, a in preset_grants(role_id).items() if r in COUNTER_RESOURCES}
+    wanted = without_never(role_id, normalise({**kept, **counter}))
+    # Nobody gives what they don't have: only the counter ticks the new role brings are held to the caller's own.
+    await _refuse_beyond_caller(caller, {r: a - held.get(r, set()) for r, a in counter.items() if a - held.get(r, set())}, None)
+    before = user.role_id
+    async with in_transaction():
+        await UserPermission.filter(user=user).delete()
+        for resource, actions in sorted(wanted.items()):
+            await UserPermission.create(
+                user=user, resource=resource, can_read="R" in actions, can_write="W" in actions, can_execute="X" in actions,
+                granted_by=caller,
+            )
+        user.role_id = role_id
+        fields = ["role_id", "updated_at"]
+        if role_id == PHARMACIST:
+            user.discount_limit = preset_limit(PHARMACIST)
+            fields.append("discount_limit")
+        await user.save(update_fields=fields)
+    from app.services import staff_sync_service
+    await staff_sync_service.emit(user.id, caller)
+    await user.refresh_from_db()
+    return user, before
+
+
 async def get_user_permissions(user_id: str) -> list[PermissionOut] | None:
     user = await User.get_or_none(id=user_id)
     if not user:
@@ -188,10 +249,11 @@ async def replace_user_permissions(
     if not target:
         return None
     excluded = excluded_resources_for_role(target.role_id)
-    wanted = normalise({
+    # What their starting point can never hold (a Pharmacist's money ticks) is left out, whatever was sent.
+    wanted = without_never(target.role_id, normalise({
         g.resource: {a for a in g.actions if a in _ACTION_FIELDS}
         for g in grants if g.resource in RESOURCES and g.resource not in excluded
-    })
+    }))
     # Only what changes has to be within the caller's own access: someone keeps abilities they already had.
     current = await grants_of(target)
     added = {r: actions - current.get(r, set()) for r, actions in wanted.items()}

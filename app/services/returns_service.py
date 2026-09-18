@@ -111,6 +111,26 @@ async def check_reason(code: str | None, remark: str | None) -> tuple[str | None
     return entry.code, text
 
 
+# Pharmacy Items:
+
+SLIP_RETURN = "Returns of pharmacy slips are taken by the Branch Manager."
+PHARMACY_RETURN = "Returns of pharmacy Items are taken by the Branch Manager."
+
+
+async def refuse_pharmacy_for(person: User, against: str, product_ids) -> None:
+    """A Salesperson never sees Pharmacy Items (services/pharmacy_service.py), so they don't take them back either: the
+    Branch Manager does. Refused before anything is priced, in words that name no Item."""
+    from app.services import pharmacy_service
+
+    if not pharmacy_service.hides_pharmacy(person):
+        return
+    ids = {str(pid) for pid in product_ids}
+    if pharmacy_service.FOLDED_ID not in ids and not await pharmacy_service.pharmacy_ids(ids):
+        return
+    sale = await SaleRecord.get_or_none(invoice_number=(against or "").strip().upper())
+    raise ReturnError(SLIP_RETURN if sale and pharmacy_service.slip_numbers(sale.slips) else PHARMACY_RETURN)
+
+
 # Pricing what comes back:
 
 async def quote(against: str, lines: list[tuple[str, Decimal]]) -> dict:
@@ -275,6 +295,7 @@ async def _create_return(cashier: User, payload: ReturnCreateRequest) -> ReturnR
     till = await till_service.session_for(cashier)
     if not till:
         raise ReturnError("No Till is open. Open one at your counter before processing a return")
+    await refuse_pharmacy_for(cashier, payload.against, [line.productId for line in payload.lines])
     priced = await quote(payload.against, _merge(payload.lines))
     if not priced["lines"]:
         raise ReturnError("Enter how many of something is coming back.")
@@ -424,6 +445,7 @@ async def _exchange(cashier: User, payload, trial: bool) -> dict:
     till = await till_service.session_for(cashier)
     if not till:
         raise ReturnError("No Till is open. Open one at your counter before taking a return")
+    await refuse_pharmacy_for(cashier, payload.against, [line.productId for line in payload.lines])
     priced = await quote(payload.against, _merge(payload.lines))
     if not priced["lines"]:
         raise ReturnError("Enter how many of something is coming back.")
@@ -572,9 +594,10 @@ async def _till_label(till_id) -> str | None:
     return f"{session.counter.name if session.counter else 'Till'} · {session.session_number}"
 
 
-async def receipt(record_id: str) -> dict:
-    """Everything a return receipt prints."""
-    from app.services import masters_service
+async def receipt(record_id: str, viewer: User | None = None) -> dict:
+    """Everything a return receipt prints. A viewer who doesn't sell Pharmacy Items gets them as one line, never by name
+    (services/pharmacy_service.py)."""
+    from app.services import masters_service, pharmacy_service
 
     try:
         record = await ReturnRecord.get_or_none(id=record_id).prefetch_related("against__party", "cashier", "lines__product")
@@ -622,6 +645,13 @@ async def receipt(record_id: str) -> dict:
                 "exchangeTotal": figures["net"], "difference": figures["net"] - refund, "differenceTenders": tenders,
                 "change": sale.cash_back or None,
             })
+    if pharmacy_service.hides_pharmacy(viewer):
+        seen = [row["productId"] for row in out["lines"]] + [row["productId"] for row in out.get("exchangeLines") or []]
+        hidden = await pharmacy_service.pharmacy_ids(seen)
+        if hidden:
+            out["lines"] = pharmacy_service.fold_rows(out["lines"], hidden, record.against.slips)
+            if out.get("exchangeLines"):
+                out["exchangeLines"] = pharmacy_service.fold_rows(out["exchangeLines"], hidden, None)
     return out
 
 
@@ -633,7 +663,7 @@ async def reprint(record_id: str, user: User) -> dict:
     so the copy number counts the reprints before this one."""
     from app.models import ActivityLog
 
-    out = await receipt(record_id)
+    out = await receipt(record_id, user)
     earlier = await ActivityLog.filter(
         route=REPRINT_ROUTE, method="POST", status_code__lt=400, path__iexact=f"/returns/{out['id']}/reprint",
     ).count()

@@ -5,9 +5,16 @@ is exactly one permission underneath (a resource and R, W or X), so what the scr
 server enforces can never drift apart. Changing something (W) or deciding something (X) always brings
 seeing it (R) along.
 
-There are two starting points — Salesperson and Branch Manager (everything) — and nothing else is fixed:
-a Sales Manager is a salesperson with discount approval and reports ticked, an Inventory Manager is stock
+There are three starting points — Salesperson, Pharmacist and Branch Manager (everything) — and nothing else is
+fixed: a Sales Manager is a salesperson with discount approval and reports ticked, an Inventory Manager is stock
 work with its approvals ticked. How much discount a person may give is set per person, beside these.
+
+One thing the starting point itself decides: which Items a person sells at the till. A Salesperson sells everything
+but Pharmacy Items, a Pharmacist Pharmacy Items only, a Branch Manager both (services/pharmacy_service.py). A Pharmacist
+never takes money: they print a pharmacy slip and the customer pays for it at the cash counter (services/slips_service.py),
+so payment, the till, returns, gift vouchers, held bills and discounts are never theirs, whatever is ticked
+(`PHARMACIST_NEVER`). A Branch Manager can switch someone between Salesperson and Pharmacist: their Sales counter ticks
+start again from the new role's, and everything else stays (a Pharmacist's discount limit becomes 0).
 
 The books are a tick per screen and action, plus which accounts a person sees and uses, by area (cash and bank,
 tax, expenses…). An area limits the ledger, the chart and vouchers; whole-book reports are ticks of their own and
@@ -22,6 +29,8 @@ from decimal import Decimal
 ABILITIES: list[tuple[str, str, str, str, str]] = [
     # ── the counter ──
     ("counter", "store.billing", "R", "Open Billing", "See the till screen and look Items up."),
+    ("counter", "store.slips", "W", "Make pharmacy slips",
+     "Ring up Pharmacy Items in Billing and print a slip. The customer pays for it at the cash counter. For Pharmacists."),
     ("counter", "store.billing", "W", "Ring up sales and take payment", "Includes giving discount up to their own limit, a percent of each bill's profit."),
     ("counter", "store.discount-override", "X", "Approve discounts for others", "Only up to this person's own discount limit."),
     ("counter", "store.hold-recall", "W", "Hold and recall bills", ""),
@@ -35,8 +44,6 @@ ABILITIES: list[tuple[str, str, str, str, str]] = [
     ("counter", "store.counters", "W", "Put people on counters", "Assign and change who works which counter, and add counters."),
     ("counter", "store.staff-on-duty", "R", "Staff on duty", "Who is on the floor now, since when, and what they've rung."),
     ("counter", "store.reprint", "X", "Reprint a receipt", "Print a bill made earlier again. It prints marked REPRINT with who and when."),
-    ("counter", "store.pharmacy", "X", "Sell Pharmacy Items",
-     "Without it, Pharmacy Items don't come up in Billing. Recalling a bill pharmacy staff held and taking its payment still works."),
     ("counter", "store.sell-past-zero", "X", "Sell when stock shows zero",
      "Goods are on the shelf but their delivery isn't entered yet. Billing warns but sells; the Item shows on Sold without stock until the delivery is received."),
     # ── stock ──
@@ -167,7 +174,11 @@ GROUPS: list[tuple[str, str]] = [
 ]
 
 SALESPERSON = "cashier"
+PHARMACIST = "pharmacist"
 BRANCH_MANAGER = "branch-manager"
+# Counter staff by how they started, and the two a Branch Manager can move someone between. Nobody is made a
+# Branch Manager, or stops being one, by a switch.
+COUNTER_ROLES = (SALESPERSON, PHARMACIST)
 
 ACCOUNTS_ABILITIES = {(resource, action) for group, resource, action, _, _ in ABILITIES if group.startswith("accounts")}
 
@@ -190,6 +201,9 @@ LEGACY_ACCOUNTS: dict[tuple[str, str], set[tuple[str, str]]] = {
 }
 # Gone for good; everything else keeps its name.
 RETIRED_RESOURCES = frozenset({"accounts.books"})
+# Ticks that now stand for nothing: taken off everyone at startup, and left out when head office still sends them.
+# "Sell Pharmacy Items" became the Pharmacist starting point.
+DROPPED_RESOURCES = frozenset({"store.pharmacy"})
 
 
 def is_legacy(resources) -> bool:
@@ -222,16 +236,28 @@ MANAGER_ONLY_RESOURCES = frozenset({"branch-console.staff", "branch-console.staf
 MANAGER_ONLY_GRANTS = {("branch-console.staff", "R"), ("branch-console.staff-access", "R"), ("branch-console.staff-access", "W"),
                        ("branch-console.backup.restore", "R"), ("branch-console.backup.restore", "X")}
 
-# The two starting points. Everything after that is ticks on the person.
+# The counter work a Salesperson starts with.
+_COUNTER_WORK = {
+    ("store.billing", "R"), ("store.billing", "W"), ("store.hold-recall", "W"), ("store.returns", "W"),
+    ("store.till", "W"), ("store.xz", "R"), ("store.gift-vouchers", "W"), ("store.gift-vouchers", "X"),
+    ("store.counters", "R"), ("store.staff-on-duty", "R"),
+}
+# A Pharmacist looks Items up and prints slips. The Counter board is there so they can tell the customer which cash
+# counter is open.
+_SLIP_WORK = {("store.billing", "R"), ("store.slips", "W"), ("store.counters", "R")}
+
+# The three starting points. Everything after that is ticks on the person; the starting point also decides which
+# Items they sell at the till.
 PRESETS: dict[str, dict] = {
     SALESPERSON: {
         "label": "Salesperson",
         "discountLimit": Decimal("5"),
-        "abilities": {
-            ("store.billing", "R"), ("store.billing", "W"), ("store.hold-recall", "W"), ("store.returns", "W"),
-            ("store.till", "W"), ("store.xz", "R"), ("store.gift-vouchers", "W"), ("store.gift-vouchers", "X"),
-            ("store.counters", "R"), ("store.staff-on-duty", "R"),
-        },
+        "abilities": set(_COUNTER_WORK),
+    },
+    PHARMACIST: {
+        "label": "Pharmacist",
+        "discountLimit": Decimal("0"),
+        "abilities": set(_SLIP_WORK),
     },
     BRANCH_MANAGER: {
         "label": "Branch Manager",
@@ -262,6 +288,53 @@ def preset_grants(role_id: str) -> dict[str, set[str]]:
     for resource, action in PRESETS.get(role_id, {}).get("abilities", set()):
         grants.setdefault(resource, set()).add(action)
     return normalise(grants)
+
+
+# The Sales counter ticks: what switching someone between Salesperson and Pharmacist starts again from the new role's.
+COUNTER_RESOURCES = frozenset(resource for group, resource, _, _, _ in ABILITIES if group == "counter")
+
+# A Pharmacist never takes money. Whatever is ticked, and whatever head office sends, these are never theirs: the server
+# refuses them (services/rbac_service.py has_permission), they are taken off a Pharmacist's account whenever it is saved,
+# switched or arrives from head office, and the access screen doesn't offer them. Whole screens, then single actions.
+PHARMACIST_NEVER_RESOURCES = frozenset({
+    "store.till", "store.xz", "store.returns", "store.gift-vouchers", "store.hold-recall", "store.discount-override",
+})
+PHARMACIST_NEVER_ACTIONS = frozenset({("store.billing", "W"), ("accounts.receivables", "W"), ("accounts.receivables", "X")})
+# What a Pharmacist is told when they try, in their words.
+_PHARMACIST_WHY = {
+    "store.billing": "A Pharmacist doesn't take payment. Print a slip, and the customer pays at the cash counter.",
+    "store.till": "A Pharmacist doesn't use a till. The customer pays at the cash counter.",
+    "store.xz": "A Pharmacist doesn't use a till. The customer pays at the cash counter.",
+    "store.returns": "A Pharmacist doesn't take returns or give refunds. Send the customer to the cash counter.",
+    "store.gift-vouchers": "A Pharmacist doesn't issue or take gift vouchers. The customer pays at the cash counter.",
+    "store.hold-recall": "A Pharmacist doesn't hold or recall bills. Your own open slips are under F5 in Billing.",
+    "store.discount-override": "A Pharmacist doesn't give or approve discounts.",
+    "accounts.receivables": "A Pharmacist doesn't take payments. The customer pays at the cash counter.",
+}
+# The one line the access screen shows beside the ticks it doesn't offer a Pharmacist.
+PHARMACIST_NOTE = "Not for a Pharmacist: they never take money."
+
+
+def never_for(role_id: str, resource: str, action: str) -> bool:
+    """True when someone who started this way can never hold this, whatever is ticked."""
+    return role_id == PHARMACIST and (resource in PHARMACIST_NEVER_RESOURCES or (resource, action) in PHARMACIST_NEVER_ACTIONS)
+
+
+def without_never(role_id: str, grants: dict[str, set[str]]) -> dict[str, set[str]]:
+    """The grants less what this starting point can never hold. Seeing Billing stays when taking payment goes."""
+    out = {resource: {a for a in actions if not never_for(role_id, resource, a)} for resource, actions in grants.items()}
+    return {resource: actions for resource, actions in out.items() if actions}
+
+
+def pharmacist_refusal(pairs) -> str | None:
+    """What a Pharmacist is told when every way in is one they never have; None when it is an ordinary missing tick."""
+    barred = [resource for resource, action in pairs if never_for(PHARMACIST, resource, action)]
+    return _PHARMACIST_WHY.get(barred[0]) if barred else None
+
+
+NOT_FOR_PHARMACIST = sorted(
+    f"{resource}:{action}" for _, resource, action, _, _ in ABILITIES if never_for(PHARMACIST, resource, action)
+)
 
 
 # The jobs the old fixed roles stood for, as ticks — used once to move existing accounts onto per-person

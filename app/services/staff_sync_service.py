@@ -12,7 +12,10 @@ import uuid
 
 from tortoise.transactions import atomic
 
-from app.core.abilities import BRANCH_MANAGER, LEGACY_JOBS, SALESPERSON, is_legacy, legacy_grants, translate_legacy, translate_legacy_resources
+from app.core.abilities import (
+    BRANCH_MANAGER, DROPPED_RESOURCES, LEGACY_JOBS, PHARMACIST, SALESPERSON, is_legacy, legacy_grants, never_for,
+    translate_legacy, translate_legacy_resources,
+)
 from app.core.device_context import get_device_id
 from app.core.resources import excluded_resources_for_role
 from app.models import OutboxEvent, Role, RoleDefaultPermission, User, UserPermission
@@ -76,9 +79,9 @@ async def apply_upsert(data: dict) -> str:
     role_id = data.get("roleId")
     if not email or not data.get("passwordHash"):
         raise StaffApplyError("The account from head office has no email or password.")
-    # Head office may still send one of the old fixed jobs. Branches start everyone as Salesperson or
+    # Head office may still send one of the old fixed jobs. Branches start everyone as Salesperson, Pharmacist or
     # Branch Manager now, so the job becomes the person's title and its usual limit, on the right start.
-    legacy = LEGACY_JOBS.get(role_id) if role_id not in (SALESPERSON, BRANCH_MANAGER) else None
+    legacy = LEGACY_JOBS.get(role_id) if role_id not in (SALESPERSON, PHARMACIST, BRANCH_MANAGER) else None
     if legacy:
         role_id = legacy["role"]
         data = {**data, "title": data.get("title") or legacy["title"]}
@@ -128,8 +131,10 @@ async def apply_upsert(data: dict) -> str:
         grants = [{"resource": r, "actions": sorted(a)} for r, a in translate_legacy(held).items()]
     for grant in grants:
         resource = grant.get("resource")
-        actions = set(grant.get("actions") or [])
-        if not resource or resource in excluded or not actions:
+        # What this starting point can never hold (a Pharmacist's money ticks) isn't taken from head office either.
+        actions = {a for a in (grant.get("actions") or []) if not never_for(role_id, resource or "", a)}
+        # A tick that now stands for nothing (Sell Pharmacy Items) isn't put back by a head office copy that still has it.
+        if not resource or resource in excluded or resource in DROPPED_RESOURCES or not actions:
             continue
         await UserPermission.create(
             user=user, resource=resource,
@@ -162,7 +167,7 @@ async def apply_role_template(data: dict) -> str:
     if is_legacy(resources):
         resources = translate_legacy_resources(resources)
     await RoleDefaultPermission.filter(role=role).delete()
-    for resource in sorted(resources - excluded):
+    for resource in sorted(resources - excluded - DROPPED_RESOURCES):
         await RoleDefaultPermission.create(role=role, resource=resource, can_read=True, can_write=True, can_execute=True)
     role.managed_by_head_office = True
     await role.save(update_fields=["managed_by_head_office"])

@@ -12,27 +12,34 @@ from app.schemas.sales import (
     SaleLineOut,
     SaleListOut,
     SaleRecordOut,
+    SaleSlipOut,
     SaleTenderOut,
 )
-from app.services import discount_approval_service, media_service, sales_service
+from app.services import discount_approval_service, media_service, pharmacy_service, sales_service
 from app.schemas.sales import PaymentProofOut
 
 
-async def _sale_out(sale: SaleRecord) -> SaleRecordOut:
+async def _sale_out(sale: SaleRecord, viewer: User | None = None, departments: set[str] | None = None) -> SaleRecordOut:
+    """`viewer` is who the bill is shown to. Someone who doesn't sell Pharmacy Items gets its Pharmacy Items as one line,
+    "Pharmacy slip P-0042 · 3 items · Rs 743", never by name (services/pharmacy_service.py). `departments` saves reading
+    the pharmacy setting again for each bill of a list."""
     method_names = {m.code: m.name for m in await PaymentMethod.all()}
+    lines = [
+        SaleLineOut(
+            productId=str(l.product_id), name=l.product.name, sku=l.product.sku,
+            qty=l.qty, unitPrice=l.unit_price, isWeighed=l.product.is_weighed, isReturn=l.is_return,
+            discAmount=l.disc_amount, aliasCode=l.alias_code,
+            level=l.sell_level, levelQty=l.level_qty, levelPrice=l.level_price, levelDetail=l.level_detail,
+            returnOf=l.return_of_invoice,
+        )
+        for l in sale.lines
+    ]
+    if pharmacy_service.hides_pharmacy(viewer):
+        lines = pharmacy_service.fold_sale_lines(sale, lines, departments if departments is not None else await pharmacy_service.departments())
     return SaleRecordOut(
         id=str(sale.id), invoiceNumber=sale.invoice_number, at=sale.at,
         cashierId=str(sale.cashier_id), partyId=str(sale.party_id), partyName=sale.party.name,
-        lines=[
-            SaleLineOut(
-                productId=str(l.product_id), name=l.product.name, sku=l.product.sku,
-                qty=l.qty, unitPrice=l.unit_price, isWeighed=l.product.is_weighed, isReturn=l.is_return,
-                discAmount=l.disc_amount, aliasCode=l.alias_code,
-                level=l.sell_level, levelQty=l.level_qty, levelPrice=l.level_price, levelDetail=l.level_detail,
-                returnOf=l.return_of_invoice,
-            )
-            for l in sale.lines
-        ],
+        lines=lines,
         gross=sale.gross, discTotal=sale.disc_total, fare=sale.fare, gst=sale.gst,
         grandTotal=sale.grand_total, netValue=sale.net_value,
         discountOverrideBy=(sale.discount_override_by.name if sale.discount_override_by else None),
@@ -50,6 +57,7 @@ async def _sale_out(sale: SaleRecord) -> SaleRecordOut:
         ],
         received=sale.received, cashBack=sale.cash_back, isCreditSale=sale.is_credit_sale,
         fbrInvoiceNumber=sale.fbr_invoice_number,
+        slips=[SaleSlipOut(**s) for s in (sale.slips or []) if isinstance(s, dict) and s.get("number")],
     )
 
 
@@ -77,7 +85,7 @@ async def create(user: User, payload: SaleCreateRequest) -> SaleRecordOut:
     except sales_service.SaleError as exc:
         # 409 for a bill that would sell at a loss; 400 for everything else wrong with it.
         raise HTTPException(exc.status, exc.message)
-    return await _sale_out(sale)
+    return await _sale_out(sale, user)
 
 
 async def upload_proof(content: bytes) -> PaymentProofOut:
@@ -97,18 +105,19 @@ async def proof_file(invoice_number: str, code: str):
     return FileResponse(path, media_type=content_type, headers={"Cache-Control": "private, max-age=3600"})
 
 
-async def get_by_invoice(invoice_number: str) -> SaleRecordOut:
+async def get_by_invoice(invoice_number: str, user: User | None = None) -> SaleRecordOut:
     sale = await sales_service.find_by_invoice(invoice_number)
     if not sale:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sale not found")
-    return await _sale_out(sale)
+    return await _sale_out(sale, user)
 
 
-async def list_sales(from_at: datetime | None, to_at: datetime | None, limit: int, offset: int) -> SaleListOut:
+async def list_sales(from_at: datetime | None, to_at: datetime | None, limit: int, offset: int, user: User | None = None) -> SaleListOut:
     limit = min(max(limit, 1), 500)
     offset = max(offset, 0)
     sales, total = await sales_service.list_sales(from_at, to_at, limit, offset)
-    return SaleListOut(items=[await _sale_out(s) for s in sales], total=total)
+    departments = await pharmacy_service.departments()
+    return SaleListOut(items=[await _sale_out(s, user, departments) for s in sales], total=total)
 
 
 REPRINT_ROUTE = "/sales/{invoice_number}/reprint"
@@ -132,7 +141,7 @@ async def reprint(invoice_number: str, user: User) -> ReceiptReprintOut:
         session = await TillSession.get_or_none(id=sale.till_session_id).prefetch_related("counter")
         if session:
             till_label = f"{session.counter.name if session.counter else 'Till'} · {session.session_number}"
-    out = await _sale_out(sale)
+    out = await _sale_out(sale, user)
     # The member's points today aren't what they were on the bill's day, so a reprint leaves the balance off.
     out.memberPoints = None
     return ReceiptReprintOut(

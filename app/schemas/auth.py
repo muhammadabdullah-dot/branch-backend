@@ -56,8 +56,8 @@ class DeviceNameRequest(BaseModel):
 
 
 class SignInRulesRequest(BaseModel):
-    """How one person signs in. `counterStaff` null follows how they started (on for a Salesperson who rings up
-    sales). `deviceIds` are the registered devices they may sign in on; empty means any computer here."""
+    """How one person signs in. `counterStaff` null follows how they started (on for a Salesperson who rings up sales
+    or a Pharmacist who makes slips). `deviceIds` are the registered devices they may sign in on; empty means any computer here."""
 
     counterStaff: bool | None = None
     deviceIds: list[str] = Field(default_factory=list, max_length=50)

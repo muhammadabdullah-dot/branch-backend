@@ -60,7 +60,7 @@ class PricedBelowCostOut(BaseModel):
 
 
 class PharmacySettingIn(BaseModel):
-    # The departments whose Items only people with "Sell Pharmacy Items" can put on a bill.
+    # The departments whose Items only a Pharmacist (or a Branch Manager) puts on a bill, and a Pharmacist only those.
     departments: list[str] = Field(default_factory=list, max_length=20)
 
 
@@ -81,7 +81,7 @@ class ScanEventIn(BaseModel):
     # Pieces on the line after it, and "pack" or "box" when sold that way.
     qty: Decimal
     level: str | None = Field(default=None, max_length=8)
-    # How it went on: "scan", "search", "weight" or "recall". Only on "added".
+    # How it went on: "scan", "search", "weight", "recall" or "slip". Only on "added".
     how: str | None = Field(default=None, max_length=12)
     # How long ago it happened, by the till's clock, when the batch was sent.
     ageMs: int = Field(default=0, ge=0)

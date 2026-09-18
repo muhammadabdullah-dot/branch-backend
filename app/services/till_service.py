@@ -82,10 +82,23 @@ async def open_till(user: User, denominations: dict[str, int], notes: str, count
         if duty:
             counter = await SalesCounter.get_or_none(id=duty.counter_id)
         else:
-            active = await SalesCounter.filter(active=True)
-            counter = active[0] if len(active) == 1 else None
+            # Then the counter this computer is registered to, else the only one there is.
+            device = get_device_id()
+            counter = await SalesCounter.get_or_none(active=True, device_id=device) if device else None
+            if counter is None:
+                active = await SalesCounter.filter(active=True)
+                counter = active[0] if len(active) == 1 else None
     if counter is None:
-        raise TillError("Say which counter this till is at.")
+        # Say what is really in the way: no counters at all, every counter taken, or simply none picked.
+        active = await SalesCounter.filter(active=True)
+        if not active:
+            raise TillError("No counter is set up yet. Add one on the Counter Board, then open the till.")
+        open_tills = await TillSession.filter(status="open", counter_id__in=[c.id for c in active]).prefetch_related("opened_by")
+        if len(open_tills) >= len(active):
+            names = {str(c.id): c.name for c in active}
+            held = ", ".join(f"{names.get(str(t.counter_id), 'a counter')} ({t.opened_by.name if t.opened_by else 'someone'})" for t in open_tills)
+            raise TillError(f"Every counter already has a till open: {held}. Close one of them, or add another counter on the Counter Board.")
+        raise TillError("Pick which counter this till is at.")
     if await TillSession.get_or_none(status="open", counter=counter):
         raise TillError(f"{counter.name} already has a till open.")
     standing = await CounterDuty.filter(counter=counter, ended_at=None).first()

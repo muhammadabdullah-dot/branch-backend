@@ -1,5 +1,5 @@
 """Billing's own lists and settings: Sold without stock, Priced below cost, which departments are Pharmacy, scan
-history, and recalling a held bill with its pharmacy lines cleared for payment.
+history, and recalling a held bill with the other side's lines cleared for payment. Pharmacy slips are routes/slips.py.
 
 Included by routes/sales.py, so it needs no line in app/main.py.
 """
@@ -48,7 +48,7 @@ async def _pharmacy_out() -> PharmacySettingOut:
     return PharmacySettingOut(departments=departments, updatedAt=row.updated_at if row else None, updatedBy=row.updated_by_name if row else None)
 
 
-# Read by anyone signed in: Billing keeps Pharmacy Items off the till for people who may not sell them.
+# Read by anyone signed in: Billing keeps each side's Items off the other side's till.
 @router.get("/masters/settings/pharmacy", response_model=PharmacySettingOut)
 async def pharmacy_setting(user: User = Depends(get_current_user)) -> PharmacySettingOut:
     return await _pharmacy_out()
@@ -56,7 +56,8 @@ async def pharmacy_setting(user: User = Depends(get_current_user)) -> PharmacySe
 
 @router.put("/masters/settings/pharmacy", response_model=PharmacySettingOut)
 async def save_pharmacy_setting(payload: PharmacySettingIn, user: User = Depends(_setting_write)) -> PharmacySettingOut:
-    """From the next scan. Stock screens are unchanged; only who may put these Items on a bill."""
+    """From the next scan. Stock screens are unchanged; only who puts these Items on a bill: Pharmacists these only,
+    Salespeople everything else."""
     await pharmacy_service.save_setting(payload.departments, user)
     return await _pharmacy_out()
 
@@ -67,20 +68,20 @@ async def save_pharmacy_setting(payload: PharmacySettingIn, user: User = Depends
 async def recall_held_bill(
     bill_id: str, payload: HeldBillRecallIn, user: User = Depends(require_permission("store.hold-recall", "W")),
 ) -> HeldBillRecallOut:
-    """Takes a held bill off the held list and hands it to the till. Someone who may not sell Pharmacy Items gets a pass
-    for the pharmacy lines pharmacy staff cleared on it, so they can still take its payment."""
+    """Takes a held bill off the held list and hands it to the till. Someone recalling a bill that carries cleared lines
+    they may not sell themselves gets a pass for those lines, so they can still take its payment. A held bill carrying
+    Pharmacy Items isn't a Salesperson's to recall: they never see those Items (services/held_bills_service.py)."""
     from app.controllers.held_bills_controller import _to_out
-    from app.models import HeldBill
+    from app.services import held_bills_service
 
-    held = await HeldBill.get_or_none(id=bill_id)
+    held = await held_bills_service.get_for(user, bill_id)
     if not held:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "That held bill is no longer there. It was recalled or voided at another counter.")
     out = _to_out(held)
     token = None
-    if not await pharmacy_service.may_sell(user):
-        cleared = pharmacy_service.cleared_lines(held.lines or [])
-        if cleared:
-            token = pharmacy_service.issue_pass(user, payload.billId, cleared)
+    cleared = await pharmacy_service.cleared_lines(held.lines or [], user)
+    if cleared:
+        token = pharmacy_service.issue_pass(user, payload.billId, cleared)
     await held.delete()
     return HeldBillRecallOut(bill=out, pharmacyPass=token)
 
@@ -102,7 +103,7 @@ async def scan_history(
     """One Pakistan day's bill lines (today when no day is given): by default those taken off a bill or never paid."""
     from app.core.pk_time import today_pk
 
-    return ScanHistoryOut(**await scan_history_service.report(day or today_pk(), userId, show))
+    return ScanHistoryOut(**await scan_history_service.report(day or today_pk(), userId, show, user))
 
 
 @router.on_event("startup")

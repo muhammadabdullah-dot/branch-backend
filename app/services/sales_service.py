@@ -268,7 +268,10 @@ async def _check_return_line(line, product: Product, lines, products: dict[str, 
 
 
 @atomic()
-async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
+async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict | None = None) -> SaleRecord:
+    """`slip` is set when this sale is a pharmacy slip's payment (services/slips_service.py pay): {"number",
+    "pharmacistId", "pharmacistName"}. Its lines are the slip's own, every one the Pharmacist's to sell, so whoever takes
+    the payment needs no pass for them; and it is a payment only, so no member is signed up and no points are earned."""
     # Idempotent replay: checked FIRST, before any other validation or side effect, so a
     # retried request (lost response, double-click) returns the already-committed sale instead
     # of re-running credit-limit checks, re-posting stock movements, or re-redeeming a voucher.
@@ -342,17 +345,23 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
         if line.isReturn:
             returns_of[id(line)] = await _check_return_line(line, products[line.productId], payload.lines, products)
 
-    # Pharmacy Items go on a bill only from people who may sell them. Someone else can still take payment for a bill
-    # pharmacy staff held, up to the pharmacy lines it carried (the pass recalling it handed them).
+    # Items go on a bill only from people who may sell them: Pharmacy Items from a Pharmacist, every other Item from a
+    # Salesperson, both from a Branch Manager. The other side can still take payment for a bill someone held, up to the
+    # lines it carried that they may not sell (the pass recalling it handed them). A pharmacy slip's payment carries only
+    # the slip's own lines, which the Pharmacist sold.
     from app.services import pharmacy_service
 
     pharmacy_departments = await pharmacy_service.departments()
-    if any(pharmacy_service.is_pharmacy(p, pharmacy_departments) for p in products.values()) and not await pharmacy_service.may_sell(cashier):
+
+    def sellable(product: Product) -> bool:
+        return pharmacy_service.may_sell_item(cashier, product, pharmacy_departments)
+
+    if slip is None and not all(sellable(p) for p in products.values()):
         try:
             allowed = pharmacy_service.verify_pass(payload.pharmacyPass, cashier, payload.clientRequestId)
         except pharmacy_service.PharmacyError as exc:
             raise SaleError(exc.message, status=403) from exc
-        refused = pharmacy_service.over_pass(payload.lines, products, pharmacy_departments, allowed)
+        refused = pharmacy_service.over_pass(payload.lines, products, allowed, sellable)
         if refused:
             # Why these Items can't go on this bill is not for this person to know: the till says only that they can't.
             raise SaleError(f"{refused} can't be sold on this bill. Take it off and try again.", status=403)
@@ -488,7 +497,8 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
 
     # Members and points. Earned on what the customer actually paid: never on what points paid for.
     details = await _tender_details(payload)
-    member = await _resolve_member(payload, party, cashier)
+    # A slip's payment is an amount collected, nothing more: card and online payments on it don't sign anyone up.
+    member = None if slip is not None else await _resolve_member(payload, party, cashier)
     loyalty = await members_service.settings()
     points_amount = payload.tenders.get("POINTS", ZERO)
     points_redeemed = 0
@@ -553,6 +563,8 @@ async def create_sale(cashier: User, payload: SaleCreateRequest) -> SaleRecord:
         is_credit_sale=is_credit_sale,
         fbr_invoice_number=fbr_invoice_number,
         client_request_id=payload.clientRequestId,
+        # The pharmacy slip this sale is the payment of, and the Pharmacist who made it.
+        slips=[slip] if slip is not None else None,
     )
 
     location = await Location.get(id=DEFAULT_LOCATION_ID)

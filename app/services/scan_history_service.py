@@ -15,7 +15,9 @@ from app.core.pk_time import day_start
 from app.models import Device, Product, SaleRecord, ScanEvent, ScanLine, User
 
 ACTIONS = ("added", "more", "less", "level", "removed", "held")
-HOWS = ("scan", "search", "weight", "recall")
+# "slip": a Pharmacist's pharmacy slip paid at the cash counter. Its lines are filed by the server when the payment is
+# taken (services/slips_service.py), under the person who took it, sold on that payment's bill.
+HOWS = ("scan", "search", "weight", "recall", "slip")
 # An open line with no sale and nothing done to it for this long is a bill that was never paid.
 UNPAID_AFTER = timedelta(hours=2)
 # An event can't be older than this: the till's queue is kept a week at most.
@@ -72,9 +74,14 @@ async def mark_sold(bill_id: str | None, invoice_number: str) -> None:
         )
 
 
-async def report(day: date, user_id: str | None, show: str) -> dict:
+async def report(day: date, user_id: str | None, show: str, viewer: User | None = None) -> dict:
     """The day's lines (Pakistan day), each with its events, how it ended and who, where and on what. `show` is
-    "removed" (taken off, and never paid), "unpaid", "held", "sold" or "all"."""
+    "removed" (taken off, and never paid), "unpaid", "held", "sold" or "all". A viewer who doesn't sell Pharmacy Items
+    sees those lines as "A pharmacy Item", never by name."""
+    from app.services import pharmacy_service
+
+    hide = pharmacy_service.hides_pharmacy(viewer)
+    pharmacy_departments = await pharmacy_service.departments() if hide else set()
     qs = ScanLine.filter(first_at__gte=day_start(day), first_at__lt=day_start(day + timedelta(days=1)))
     everyone = await qs.values_list("user_id", flat=True)
     if user_id:
@@ -102,11 +109,13 @@ async def report(day: date, user_id: str | None, show: str) -> dict:
         wanted = {"removed": ("removed", "unpaid"), "unpaid": ("unpaid",), "held": ("held",), "sold": ("sold",)}.get(show)
         if wanted and ended not in wanted:
             continue
+        unseen = hide and pharmacy_service.is_pharmacy(line.product, pharmacy_departments)
         rows.append({
             "id": str(line.id), "billId": line.bill_id, "firstAt": line.first_at, "endedAt": line.ended_at if ended in ("removed", "held", "sold") else None,
             "userId": str(line.user_id), "userName": line.user.name, "counter": line.counter.name if line.counter else None,
             "till": line.till_session.session_number if line.till_session else None, "deviceId": line.device_id,
-            "productId": str(line.product_id), "sku": line.product.sku, "name": line.product.name,
+            "productId": pharmacy_service.FOLDED_ID if unseen else str(line.product_id), "sku": "" if unseen else line.product.sku,
+            "name": "A pharmacy Item" if unseen else line.product.name,
             "qty": line.qty, "level": line.level, "how": line.how, "outcome": ended, "invoiceNumber": line.invoice_number,
             "events": [{"at": ev.at, "action": ev.action, "qty": ev.qty, "level": ev.level} for ev in sorted(line.events, key=lambda ev: ev.at)],
         })

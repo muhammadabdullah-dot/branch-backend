@@ -13,7 +13,8 @@ _write = require_permission("store.hold-recall", "W")
 
 @router.get("", response_model=list[HeldBillOut])
 async def list_all(user: User = Depends(_read)) -> list[HeldBillOut]:
-    return await held_bills_controller.list_all()
+    # A Salesperson's list leaves out held bills carrying Pharmacy Items: those are the Branch Manager's.
+    return await held_bills_controller.list_all(user)
 
 
 @router.post("", response_model=HeldBillOut)
@@ -23,5 +24,5 @@ async def hold(payload: HeldBillCreate, user: User = Depends(_write)) -> HeldBil
 
 @router.delete("/{bill_id}")
 async def remove(bill_id: str, user: User = Depends(_write)) -> dict:
-    await held_bills_controller.remove(bill_id)
+    await held_bills_controller.remove(bill_id, user)
     return {"detail": "removed"}

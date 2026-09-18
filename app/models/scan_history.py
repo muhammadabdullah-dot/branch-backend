@@ -28,7 +28,7 @@ class ScanLine(models.Model):
         "models.SalesCounter", related_name="scan_lines", null=True, on_delete=fields.SET_NULL
     )
     device_id = fields.CharField(max_length=80, null=True)
-    # How it went on: "scan", "search", "weight" or "recall".
+    # How it went on: "scan", "search", "weight", "recall", or "slip" (a pharmacy slip paid at the cash counter).
     how = fields.CharField(max_length=12, default="scan")
     first_at = fields.DatetimeField()
     last_at = fields.DatetimeField()

@@ -64,8 +64,8 @@ class SaleCreateRequest(BaseModel):
     # the already-committed sale instead of creating a second one. Omit for the old behavior.
     # Required in practice for an above-authority discount, since the approval is bound to it.
     clientRequestId: str | None = None
-    # For someone without "Sell Pharmacy Items" finishing a bill pharmacy staff held: the pass recalling it handed them,
-    # for this bill's clientRequestId (services/pharmacy_service.py).
+    # For someone finishing a bill held by the other side (a Salesperson a Pharmacist's, or the other way round): the pass
+    # recalling it handed them, for this bill's clientRequestId (services/pharmacy_service.py).
     pharmacyPass: str | None = Field(default=None, max_length=4000)
 
 
@@ -109,6 +109,9 @@ class SaleLineOut(BaseModel):
     levelDetail: str | None = None
     # A return line: the bill its goods came from.
     returnOf: str | None = None
+    # One line standing in for a bill's Pharmacy Items, for someone who doesn't sell them: "Pharmacy slip P-0042 · 3 items
+    # · Rs 743", never the Items (services/pharmacy_service.py fold_sale_lines). It can't be returned from here.
+    folded: bool = False
 
 
 class SaleTenderOut(BaseModel):
@@ -119,6 +122,13 @@ class SaleTenderOut(BaseModel):
     transactionId: str | None = None
     account: str | None = None
     hasProof: bool = False
+
+
+class SaleSlipOut(BaseModel):
+    """A pharmacy slip this bill paid, and the Pharmacist who made it."""
+    number: str
+    pharmacistId: str | None = None
+    pharmacistName: str | None = None
 
 
 class SaleRecordOut(BaseModel):
@@ -147,6 +157,8 @@ class SaleRecordOut(BaseModel):
     cashBack: Money
     isCreditSale: bool
     fbrInvoiceNumber: str
+    # The pharmacy slip this bill is the payment of (earlier bills could carry several). Empty on most bills.
+    slips: list[SaleSlipOut] = []
 
 
 class ReceiptReprintOut(BaseModel):

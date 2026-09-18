@@ -33,11 +33,13 @@ async def create(user: User, payload: ReturnCreateRequest) -> ReturnRecordOut:
     return await _record_out(record)
 
 
-async def quote(payload: ReturnQuoteRequest) -> dict:
+async def quote(payload: ReturnQuoteRequest, user: User | None = None) -> dict:
     merged: dict = {}
     for line in payload.lines:
         merged[line.productId] = merged.get(line.productId, 0) + line.qty
     try:
+        if user is not None:
+            await returns_service.refuse_pharmacy_for(user, payload.against, merged)
         priced = await returns_service.quote(payload.against, list(merged.items()))
     except returns_service.ReturnError as exc:
         raise _fail(exc)
@@ -63,16 +65,16 @@ async def quote_exchange(user: User, payload: ExchangeRequest) -> dict:
 async def exchange(user: User, payload: ExchangeRequest) -> ExchangeOut:
     try:
         record, sale = await returns_service.create_exchange(user, payload)
-        out = await returns_service.receipt(str(record.id))
+        out = await returns_service.receipt(str(record.id), user)
     except returns_service.ReturnError as exc:
         raise _fail(exc)
     await sale.fetch_related("lines__product", "tenders", "party", "cashier", "discount_override_by", "member")
-    return ExchangeOut(receipt=ReturnReceiptOut(**out), sale=await _sale_out(sale))
+    return ExchangeOut(receipt=ReturnReceiptOut(**out), sale=await _sale_out(sale, user))
 
 
-async def receipt(return_id: str) -> ReturnReceiptOut:
+async def receipt(return_id: str, user: User | None = None) -> ReturnReceiptOut:
     try:
-        return ReturnReceiptOut(**await returns_service.receipt(return_id))
+        return ReturnReceiptOut(**await returns_service.receipt(return_id, user))
     except returns_service.ReturnError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, exc.message)
 

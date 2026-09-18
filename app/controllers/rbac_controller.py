@@ -1,6 +1,7 @@
 from fastapi import HTTPException, status
 
 from app.models import User
+from app.core.abilities import PRESETS
 from app.schemas.rbac import (
     RoleOut,
     UpdatePermissionsRequest,
@@ -8,6 +9,7 @@ from app.schemas.rbac import (
     UserNameOut,
     UserSummaryOut,
     UserUpdateRequest,
+    WorksAsRequest,
 )
 from app.services import rbac_service
 
@@ -63,6 +65,26 @@ async def update_user(user_id: str, payload: UserUpdateRequest, caller: User) ->
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     return _out(user)
+
+
+async def switch_works_as(user_id: str, payload: WorksAsRequest, caller: User) -> tuple[UserSummaryOut, str | None]:
+    """The person as they now are, and what the activity trail notes about it ("Salesperson to Pharmacist"), None when
+    they already worked as that."""
+    if user_id == str(caller.id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can't change your own access. Ask another manager.")
+    try:
+        result = await rbac_service.switch_works_as(user_id, payload.roleId, caller)
+    except rbac_service.RbacError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    if result is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    user, before = result
+
+    def label(role_id: str) -> str:
+        return PRESETS.get(role_id, {}).get("label", role_id)
+
+    note = f"{user.name}: {label(before)} to {label(user.role_id)}" if before else None
+    return _out(user), note
 
 
 async def list_users() -> list[UserSummaryOut]:

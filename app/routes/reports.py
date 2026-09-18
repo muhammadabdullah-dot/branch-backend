@@ -144,4 +144,4 @@ async def kpi_detail(
     """One figure opened up, narrowed by what the reader picked on the way down: a day, a department, category or
     brand, an Item, a person, or a single bill. `path` is the order they picked them in, for the breadcrumb."""
     p = _period(period, from_, to, "today")
-    return await _answer(branch_kpi_service.detail(kpi_id, p, root, day, productId, userId, groupKind, group, invoice, path))
+    return await _answer(branch_kpi_service.detail(kpi_id, p, root, day, productId, userId, groupKind, group, invoice, path, user))

@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from tortoise.expressions import F, Q
 from tortoise.transactions import in_transaction
 
-from app.core.abilities import BRANCH_MANAGER, SALESPERSON
+from app.core.abilities import BRANCH_MANAGER, COUNTER_ROLES, PHARMACIST
 from app.core.pk_time import day_start, pk_day, pk_time
 from app.core.security import TOKEN_TTL
 from app.models import Device, LoginSession, User, UserDevice, UserPermission
@@ -89,14 +89,20 @@ def _live(now: datetime) -> Q:
     return Q(ended_at__isnull=True, expires_at__gt=now) & (Q(one_login=False) | Q(last_seen_at__gt=now - IDLE_LIMIT))
 
 
+def _counter_work(role_id: str) -> str:
+    """What makes someone counter staff by default: ringing up sales for a Salesperson, making slips for a Pharmacist."""
+    return "store.slips" if role_id == PHARMACIST else "store.billing"
+
+
 async def _automatic(user: User) -> bool:
-    if user.role_id != SALESPERSON:
+    if user.role_id not in COUNTER_ROLES:
         return False
-    return await UserPermission.exists(user_id=user.id, resource="store.billing", can_write=True)
+    return await UserPermission.exists(user_id=user.id, resource=_counter_work(user.role_id), can_write=True)
 
 
 async def is_counter_staff(user: User) -> bool:
-    """Under the counter staff rule: as switched on the person, or by default a Salesperson who rings up sales."""
+    """Under the counter staff rule: as switched on the person, or by default a Salesperson who rings up sales or a
+    Pharmacist who makes pharmacy slips."""
     if user.counter_login is not None:
         return bool(user.counter_login)
     return await _automatic(user)
@@ -104,10 +110,13 @@ async def is_counter_staff(user: User) -> bool:
 
 async def counter_staff_ids() -> set[str]:
     users = await User.filter(active=True).values("id", "role_id", "counter_login")
-    billers = {str(u) for u in await UserPermission.filter(resource="store.billing", can_write=True).values_list("user_id", flat=True)}
+    workers = {
+        (str(u), r) for u, r in await UserPermission.filter(resource__in=["store.billing", "store.slips"], can_write=True).values_list("user_id", "resource")
+    }
     return {
         str(u["id"]) for u in users
-        if (u["counter_login"] if u["counter_login"] is not None else (u["role_id"] == SALESPERSON and str(u["id"]) in billers))
+        if (u["counter_login"] if u["counter_login"] is not None
+            else (u["role_id"] in COUNTER_ROLES and (str(u["id"]), _counter_work(u["role_id"])) in workers))
     }
 
 

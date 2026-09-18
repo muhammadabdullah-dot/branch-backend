@@ -14,10 +14,11 @@ class User(models.Model):
     # is whatever is ticked on the account; the title is for people reading the staff list.
     title = fields.CharField(max_length=80, null=True)
     # The most bill discount they may give without someone else approving it, and the most they may approve
-    # for others. Null means the starting point's (Salesperson 5%, Branch Manager 100%).
+    # for others. Null means the starting point's (Salesperson 5%, Pharmacist 0%, Branch Manager 100%).
     discount_limit = fields.DecimalField(max_digits=5, decimal_places=2, null=True)
     # Counter staff rule: one login at a time, and only on the devices assigned to them. Null follows how they
-    # started: on for a Salesperson who rings up sales, off for everyone else. Kept at this branch only.
+    # started: on for a Salesperson who rings up sales or a Pharmacist who makes slips, off for everyone else. Kept at
+    # this branch only.
     counter_login = fields.BooleanField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     # Raised by one on every change to the account here or at head office. The higher revision wins

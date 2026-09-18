@@ -18,7 +18,7 @@ async def _return_and_sell(user: User = Depends(get_current_user)) -> User:
     needed = [("store.returns", "W"), ("store.billing", "W")]
     missing = [pair for pair in needed if not await has_permission(user, *pair)]
     if missing:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, refusal(missing))
+        raise HTTPException(status.HTTP_403_FORBIDDEN, refusal(missing, user))
     return user
 
 
@@ -60,7 +60,7 @@ async def save_return_windows(payload: ReturnWindowsIn, user: User = Depends(_wi
 
 @router.get("/returns/{return_id}/receipt", response_model=ReturnReceiptOut)
 async def return_receipt(return_id: str, user: User = Depends(_receipt_read)) -> ReturnReceiptOut:
-    return await returns_controller.receipt(return_id)
+    return await returns_controller.receipt(return_id, user)
 
 
 # Looking isn't a reprint; this POST is, and the activity log keeps who and when, which is how the copy is numbered.

@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 from pydantic import BaseModel
 
 from app.controllers import rbac_controller
+from app.controllers.auth_controller import note_header
 from app.middlewares.auth import get_current_user, require_branch_manager
 from app.models import User
 from app.schemas.auth import PermissionOut
@@ -14,6 +15,7 @@ from app.schemas.rbac import (
     UserNameOut,
     UserSummaryOut,
     UserUpdateRequest,
+    WorksAsRequest,
 )
 
 router = APIRouter(prefix="/rbac", tags=["rbac"])
@@ -47,6 +49,9 @@ class GroupWithGridOut(AbilityGroupOut):
 
 class CatalogOut(AbilitiesOut):
     groups: list[GroupWithGridOut]
+    # The ticks the access screen doesn't offer a Pharmacist (they never take money), and the line it says about them.
+    notForPharmacist: list[str] = []
+    pharmacistNote: str | None = None
 
 
 @router.get("/resources", response_model=list[str])
@@ -56,7 +61,7 @@ async def resources(user: User = Depends(_read)) -> list[str]:
 
 @router.get("/abilities", response_model=CatalogOut)
 async def abilities(user: User = Depends(_read)) -> CatalogOut:
-    """Everything a person at the branch can be given, grouped and in plain words, with the two starting points."""
+    """Everything a person at the branch can be given, grouped and in plain words, with the three starting points."""
     return CatalogOut(**rbac_controller.abilities())
 
 
@@ -87,6 +92,20 @@ async def update_user(
     Deactivate rather than delete: a user is on the other end of every sale, adjustment and
     till close they ever made, and removing the row would orphan that history."""
     return await rbac_controller.update_user(user_id, payload, caller)
+
+
+@users_router.put("/{user_id}/works-as", response_model=UserSummaryOut)
+async def switch_between_salesperson_and_pharmacist(
+    user_id: str, payload: WorksAsRequest, response: Response, caller: User = Depends(_write)
+) -> UserSummaryOut:
+    """Which Items someone sells at the till, and whether they take payment. Their Sales counter ticks start again from
+    the new role's; other ticks, title and limit stay (a Pharmacist's limit becomes 0). A Branch Manager isn't switched and
+    nobody is made one here. Goes to head office like any other change to the account; the activity trail
+    records it under this function's name, noting who moved from what to what."""
+    out, note = await rbac_controller.switch_works_as(user_id, payload, caller)
+    if note:
+        response.headers.update(note_header(note))
+    return out
 
 
 @users_router.get("", response_model=list[UserSummaryOut])
