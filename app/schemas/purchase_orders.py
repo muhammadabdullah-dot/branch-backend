@@ -108,3 +108,6 @@ class ByHandIn(BaseModel):
     # What it sells for, when known.
     price: Decimal | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=40)
+    # How it comes, as on the Item form: a bigger pack (carton) and how many units make one. Both or neither.
+    packUnit: str | None = Field(default=None, max_length=40)
+    packSize: int | None = None

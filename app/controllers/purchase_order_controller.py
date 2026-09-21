@@ -104,7 +104,9 @@ async def add_by_hand(user: User, data):
     from app.controllers.catalog_controller import _to_out
 
     try:
-        product = await purchase_order_service.add_by_hand(user, data.name, data.unit, data.cost, data.price, data.sku)
+        product = await purchase_order_service.add_by_hand(
+            user, data.name, data.unit, data.cost, data.price, data.sku, data.packUnit, data.packSize,
+        )
     except purchase_order_service.PurchaseOrderError as exc:
         _raise(exc)
     return _to_out(product)
