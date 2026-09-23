@@ -111,8 +111,14 @@ async def create_return(payload: ReturnCreateRequest, user: User = Depends(_retu
 # Sold without stock, Priced below cost, the pharmacy setting, scan history and recalling a held bill: their own file,
 # brought in here so app/main.py needs no line for them.
 from app.routes.billing_extras import router as _billing_extras_router  # noqa: E402
+from app.routes.fbr import router as _fbr_router  # noqa: E402
+from app.routes.invoice_numbers import router as _invoice_numbers_router  # noqa: E402
 from app.routes.slips import router as _slips_router  # noqa: E402
 
 router.include_router(_billing_extras_router)
 # Pharmacy slips: made by a Pharmacist, paid on their own at the cash counter.
 router.include_router(_slips_router)
+# FBR invoices: the settings, the invoices waiting for FBR, and the loop that sends them.
+router.include_router(_fbr_router)
+# Invoice numbers: the bill and return prefixes, the year, the digits and the next bill number.
+router.include_router(_invoice_numbers_router)

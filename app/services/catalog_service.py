@@ -9,8 +9,10 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from tortoise.expressions import Q
+from tortoise.functions import Count
 from tortoise.transactions import atomic
 
+from app.core.ordering import by_column
 from app.models import GRNLine, Product, ProductAlias, ProductPriceChange, ProductSupplier, Supplier, User
 from app.schemas.catalog import ProductAliasIn, ProductCreate, ProductSupplierIn, ProductUpdate
 from app.schemas.import_result import ImportRowError, ImportSummary
@@ -58,7 +60,10 @@ def _to_model_fields(data: dict) -> dict:
 PRODUCT_SORTS = {
     "sku": "sku", "name": "name", "brand": "brand", "category": "category",
     "price": "price", "taxRate": "tax_rate", "unit": "unit", "avgCost": "avg_cost",
+    # How many alternate barcodes an Item has, counted in the database (see list_all).
+    "aliases": "alias_count",
 }
+PRODUCT_SORT_KINDS = {"sku": "code", "name": "text", "brand": "text", "category": "text", "unit": "text"}
 
 
 async def list_all(
@@ -88,7 +93,10 @@ async def list_all(
     # or skips a product that shares a price or a brand with its neighbour.
     field = PRODUCT_SORTS.get(sort or "name", "name")
     direction = "-" if order == "desc" else ""
-    items = await qs.order_by(f"{direction}{field}", "id").offset(offset).limit(limit).prefetch_related("aliases")
+    if field == "alias_count":
+        qs = qs.annotate(alias_count=Count("aliases", distinct=True))
+    qs, keys = by_column(qs, field, direction, PRODUCT_SORT_KINDS.get(field))
+    items = await qs.order_by(*keys, "id").offset(offset).limit(limit).prefetch_related("aliases")
     return items, total
 
 

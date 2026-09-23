@@ -87,7 +87,7 @@ async def movements(
 ) -> StockMovementListOut:
     """The stock ledger. Filtered and sorted on the server — by date, kind, product and location —
     because it holds tens of thousands of rows and a screen only ever holds a page of them.
-    `sort` is one of at, qty, kind, item, location, by; `order` is asc or desc (default desc)."""
+    `sort` is one of at, qty, kind, item, code, location, by; `order` is asc or desc (default desc)."""
     return await inventory_controller.list_movements(productId, locationId, limit, offset, from_, to, kind, sort, order)
 
 

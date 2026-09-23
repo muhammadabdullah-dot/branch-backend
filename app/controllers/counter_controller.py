@@ -38,7 +38,7 @@ async def create(user: User, payload: CounterCreateRequest) -> CounterBoardOut:
 
 async def update(user: User, counter_id: str, payload: CounterUpdateRequest) -> CounterBoardOut:
     try:
-        await counter_service.update_counter(user, counter_id, payload.name, payload.location, payload.active)
+        await counter_service.update_counter(user, counter_id, payload.name, payload.location, payload.active, payload.code)
     except counter_service.CounterError as exc:
         raise _fail(exc)
     return await board()

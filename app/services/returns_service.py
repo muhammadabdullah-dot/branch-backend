@@ -36,7 +36,6 @@ from app.models import (
     User,
     VoucherRedemption,
     balance_for,
-    next_value,
 )
 from app.schemas.sales import MemberIn, ReturnCreateRequest, SaleCreateRequest, SaleLineIn
 from app.schemas.types import money_str
@@ -198,11 +197,13 @@ def _merge(lines) -> list[tuple[str, Decimal]]:
 
 
 async def _next_number() -> str:
-    """MT-RT-2026-000001: the branch's code, RT for a return, the Pakistan year, then the running number."""
-    from app.services.sales_service import invoice_prefix
+    """MT-RT-2026-000001: the return prefix (the branch's code and RT unless its Branch Manager set another under Invoice
+    numbers), the Pakistan year and the running number, with the bill's year and digits. From 1 on a new branch, and on
+    from the highest return number on one that has returns; never a number already used, nor one a bill carries
+    (services/invoice_numbers_service.py)."""
+    from app.services import invoice_numbers_service
 
-    seq = await next_value("sale_return", 1)
-    return f"{await invoice_prefix()}-RT-{today_pk().year}-{seq:06d}"
+    return await invoice_numbers_service.next_return_number()
 
 
 def shown_number(record: ReturnRecord) -> str:
@@ -256,6 +257,10 @@ async def _record_return(
             origin_user=cashier, at=now, unit_cost=line["unitCost"],
         )
 
+    # The return's own FBR invoice, a credit note against the bill (services/fbr_service.py), in this transaction.
+    from app.services import fbr_service
+
+    await fbr_service.issue_for_return(record, sale)
     await _reverse_points(sale, refund_total, cashier)
     return record
 
@@ -597,7 +602,7 @@ async def _till_label(till_id) -> str | None:
 async def receipt(record_id: str, viewer: User | None = None) -> dict:
     """Everything a return receipt prints. A viewer who doesn't sell Pharmacy Items gets them as one line, never by name
     (services/pharmacy_service.py)."""
-    from app.services import masters_service, pharmacy_service
+    from app.services import fbr_service, masters_service, pharmacy_service
 
     try:
         record = await ReturnRecord.get_or_none(id=record_id).prefetch_related("against__party", "cashier", "lines__product")
@@ -620,6 +625,8 @@ async def receipt(record_id: str, viewer: User | None = None) -> dict:
         "reasonLabel": reasons[record.reason].name if record.reason in reasons else record.reason,
         "remark": record.note, "cashierName": record.cashier.name if record.cashier else None,
         "tillLabel": await _till_label(record.till_session_id),
+        # The return's FBR invoice (a credit note): a test number, FBR's number, or waiting for FBR. None on older returns.
+        "fbr": await fbr_service.stamp_for_return(record),
     }
     if record.exchange_sale_id:
         sale = await SaleRecord.get_or_none(id=record.exchange_sale_id).prefetch_related("lines__product", "tenders")
@@ -639,8 +646,9 @@ async def receipt(record_id: str, viewer: User | None = None) -> dict:
                 if amount > 0:
                     tenders.append({"code": t.code, "name": names.get(t.code, t.code.title()), "amount": amount,
                                     "reference": t.reference})
+            stamp = await fbr_service.stamp_for_sale(sale)
             out.update({
-                "exchangeInvoice": sale.invoice_number, "exchangeFbrInvoice": sale.fbr_invoice_number,
+                "exchangeInvoice": sale.invoice_number, "exchangeFbrInvoice": stamp["number"], "exchangeFbr": stamp,
                 "exchangeLines": _with_unit(figures["lines"]), "exchangeGst": figures["gst"], "exchangeDiscount": figures["discount"],
                 "exchangeTotal": figures["net"], "difference": figures["net"] - refund, "differenceTenders": tenders,
                 "change": sale.cash_back or None,
@@ -671,15 +679,16 @@ async def reprint(record_id: str, user: User) -> dict:
     return out
 
 
-async def list_returns(from_at: datetime | None, to_at: datetime | None, limit: int = 200) -> list[dict]:
-    """Returns taken in a period, newest first: today's by default."""
+async def list_returns(from_at: datetime | None, to_at: datetime | None, limit: int = 200, cashier_id=None) -> list[dict]:
+    """Returns taken in a period, newest first: today's by default. `cashier_id` keeps it to the returns one person took
+    (a salesperson sees their own, like their own bills: sales_service.sees_every_bill)."""
     from app.core.pk_time import day_start
     from app.services import masters_service
 
     if from_at is None and to_at is None:
         from_at = day_start(today_pk())
         to_at = from_at + timedelta(days=1)
-    qs = ReturnRecord.all()
+    qs = ReturnRecord.all() if cashier_id is None else ReturnRecord.filter(cashier_id=cashier_id)
     if from_at:
         qs = qs.filter(at__gte=from_at)
     if to_at:
@@ -750,6 +759,10 @@ async def reverse_voucher_sale(invoice_number: str, processed_by: User, reason: 
     await voucher.save()
     # A negative redemption keeps the voucher's history honest: spent on this invoice, then given back.
     await VoucherRedemption.create(voucher=voucher, invoice_number=sale.invoice_number, amount=-amount)
+
+    from app.services import fbr_service
+
+    await fbr_service.issue_for_return(record, sale)
 
     await OutboxEvent.create(
         aggregate_type="ReturnRecord", aggregate_id=str(record.id),

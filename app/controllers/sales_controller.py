@@ -15,14 +15,17 @@ from app.schemas.sales import (
     SaleSlipOut,
     SaleTenderOut,
 )
-from app.services import discount_approval_service, media_service, pharmacy_service, sales_service
+from app.services import discount_approval_service, fbr_service, media_service, pharmacy_service, sales_service
+from app.schemas.fbr import FbrStampOut
 from app.schemas.sales import PaymentProofOut
 
 
-async def _sale_out(sale: SaleRecord, viewer: User | None = None, departments: set[str] | None = None) -> SaleRecordOut:
+async def _sale_out(
+    sale: SaleRecord, viewer: User | None = None, departments: set[str] | None = None, fbr_stamps: dict[str, dict] | None = None,
+) -> SaleRecordOut:
     """`viewer` is who the bill is shown to. Someone who doesn't sell Pharmacy Items gets its Pharmacy Items as one line,
     "Pharmacy slip P-0042 · 3 items · Rs 743", never by name (services/pharmacy_service.py). `departments` saves reading
-    the pharmacy setting again for each bill of a list."""
+    the pharmacy setting again for each bill of a list, and `fbr_stamps` the bills' FBR invoices."""
     method_names = {m.code: m.name for m in await PaymentMethod.all()}
     lines = [
         SaleLineOut(
@@ -36,6 +39,7 @@ async def _sale_out(sale: SaleRecord, viewer: User | None = None, departments: s
     ]
     if pharmacy_service.hides_pharmacy(viewer):
         lines = pharmacy_service.fold_sale_lines(sale, lines, departments if departments is not None else await pharmacy_service.departments())
+    fbr = fbr_stamps.get(str(sale.id)) if fbr_stamps is not None else await fbr_service.stamp_for_sale(sale)
     return SaleRecordOut(
         id=str(sale.id), invoiceNumber=sale.invoice_number, at=sale.at,
         cashierId=str(sale.cashier_id), partyId=str(sale.party_id), partyName=sale.party.name,
@@ -56,7 +60,8 @@ async def _sale_out(sale: SaleRecord, viewer: User | None = None, departments: s
             for t in sale.tenders
         ],
         received=sale.received, cashBack=sale.cash_back, isCreditSale=sale.is_credit_sale,
-        fbrInvoiceNumber=sale.fbr_invoice_number,
+        fbrInvoiceNumber=(fbr or {}).get("number") or sale.fbr_invoice_number or "",
+        fbr=FbrStampOut(**fbr) if fbr else None,
         slips=[SaleSlipOut(**s) for s in (sale.slips or []) if isinstance(s, dict) and s.get("number")],
     )
 
@@ -85,6 +90,9 @@ async def create(user: User, payload: SaleCreateRequest) -> SaleRecordOut:
     except sales_service.SaleError as exc:
         # 409 for a bill that would sell at a loss; 400 for everything else wrong with it.
         raise HTTPException(exc.status, exc.message)
+    # The bill has committed. In sandbox or production one short try gets FBR's number onto the receipt; when FBR can't
+    # be reached the receipt says the invoice is waiting for FBR, and the server sends it on its own.
+    await fbr_service.send_after_commit(sales=[sale])
     return await _sale_out(sale, user)
 
 
@@ -115,9 +123,13 @@ async def get_by_invoice(invoice_number: str, user: User | None = None) -> SaleR
 async def list_sales(from_at: datetime | None, to_at: datetime | None, limit: int, offset: int, user: User | None = None) -> SaleListOut:
     limit = min(max(limit, 1), 500)
     offset = max(offset, 0)
-    sales, total = await sales_service.list_sales(from_at, to_at, limit, offset)
+    # A salesperson's list is their own bills; a Branch Manager, the Counter board, Staff on duty, Reports and the
+    # Dashboard see the branch's (sales_service.sees_every_bill).
+    own = None if user is None or await sales_service.sees_every_bill(user) else user.id
+    sales, total = await sales_service.list_sales(from_at, to_at, limit, offset, cashier_id=own)
     departments = await pharmacy_service.departments()
-    return SaleListOut(items=[await _sale_out(s, user, departments) for s in sales], total=total)
+    stamps = await fbr_service.stamps_for_sales(list(sales))
+    return SaleListOut(items=[await _sale_out(s, user, departments, stamps) for s in sales], total=total)
 
 
 REPRINT_ROUTE = "/sales/{invoice_number}/reprint"

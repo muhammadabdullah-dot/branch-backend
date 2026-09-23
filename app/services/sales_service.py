@@ -8,7 +8,7 @@ from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from tortoise.transactions import atomic
 
 from app.core.device_context import get_device_id
-from app.core.pk_time import now_pk, today_pk
+from app.core.pk_time import now_pk
 from app.models import (
     Location,
     OutboxEvent,
@@ -21,7 +21,6 @@ from app.models import (
     StockMovement,
     TillSession,
     User,
-    next_value,
 )
 from app.schemas.sales import SaleCreateRequest
 from app.schemas.types import money_str
@@ -46,6 +45,9 @@ class SaleError(Exception):
 
 # A bill that would sell at a loss is refused whatever approval came with it: nobody can override the floor.
 LOSS = 409
+# A line at a price that isn't the Item's own (a price changed since it was scanned, or one typed): the till fetches the
+# prices again and says what changed.
+PRICE_CHANGED = 409
 
 
 # Until this branch server has been verified it has no identity, and an invoice has to be numbered
@@ -56,12 +58,16 @@ UNVERIFIED_PREFIX = "BR"
 
 
 async def invoice_prefix() -> str:
-    """This branch's own code, from the identity head office issued it.
+    """This branch's own code, from the identity head office issued it (BR before setup).
 
     It used to be the literal string "HO". That was the head office assumption baked into the
     numbering: every branch in the chain would have printed bills numbered as if they were Head
     Office, and two branches' invoice numbers would have collided the moment a second one opened.
     A branch is a branch: its bills carry its own code.
+
+    It is the branch code, not the bill prefix: members' codes and FBR's test numbers use it as it is. How bills and
+    returns are numbered is the Invoice numbers setting (services/invoice_numbers_service.py), whose prefixes start with
+    this code.
     """
     from app.services import registration_service
 
@@ -70,17 +76,22 @@ async def invoice_prefix() -> str:
 
 
 async def peek_next_invoice_number() -> str:
-    from app.models import Counter
+    """The number the next bill will most likely get (another till may take it first): GG-2026-000001 on a new branch,
+    or whatever the branch's Invoice numbers setting makes it."""
+    from app.services import invoice_numbers_service
 
-    counter = await Counter.get_or_none(id="invoice")
-    seq = counter.value if counter else 143
-    return f"{await invoice_prefix()}-{_invoice_year()}-{seq:06d}"
+    return await invoice_numbers_service.peek_bill_number()
 
 
-def _invoice_year() -> int:
-    """The branch's own trading year, not the server's UTC one: Pakistan is UTC+5, so a sale rung
-    at half past nine in the evening on 31 December is still last year's bill."""
-    return today_pk().year
+async def next_invoice_number() -> str:
+    """GG-2026-000001: the bill prefix (the branch's code unless its Branch Manager set another under Invoice numbers),
+    the Pakistan year, then the bill's running number, padded to 6 digits unless set otherwise. It starts at 1 on a new
+    branch (it used to start at 143, a number left from the demo data) and carries on from the highest bill on a branch
+    that has bills; a number already on a bill is never handed out again, and no bill is renumbered. With the year in
+    the number each year counts from 1 again. Inside the sale's own transaction (services/invoice_numbers_service.py)."""
+    from app.services import invoice_numbers_service
+
+    return await invoice_numbers_service.next_bill_number()
 
 
 async def _resolve_party(party_id: str | None) -> Party:
@@ -190,20 +201,104 @@ def _line_gross(line, unit_price: Decimal) -> Decimal:
     return sign * line.qty * unit_price
 
 
-def _own_price(line, product: Product, wholesale_pct: Decimal) -> bool:
-    """Is this line at one of the Item's own prices: its sale price, or its wholesale price (its own, else the sale price
-    less the branch's wholesale discount, to the rupee, as the till works it out)? An Item already priced below cost
-    still sells at its own price; any other price below cost is refused."""
-    wholesale = product.wholesale_price if product.wholesale_price is not None else (
-        product.price * (Decimal("100") - wholesale_pct) / Decimal("100")
+CENT = Decimal("0.01")
+
+
+def _cents(value) -> Decimal:
+    return Decimal(value).quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def _own_prices(line, product: Product, wholesale_pct: Decimal) -> dict[str, Decimal | None]:
+    """The Item's own prices for what this line sells: {"retail": its sale price, "wholesale": its wholesale price (its
+    own, else the sale price less the branch's wholesale discount, to the rupee, as the till works it out)}. A line sold
+    loose or together is priced by the piece, strip, pack or box (services/sell_levels.py)."""
+    wholesale = Decimal(product.wholesale_price) if product.wholesale_price is not None else (
+        Decimal(product.price) * (Decimal("100") - wholesale_pct) / Decimal("100")
     ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     if line.level:
-        prices = {sell_levels.own_price(product, line.level), sell_levels.wholesale_price(product, line.level, Decimal(wholesale))}
-        price = Decimal(line.levelPrice)
-    else:
-        prices = {Decimal(product.price), Decimal(wholesale)}
-        price = Decimal(line.unitPrice)
-    return price.quantize(Decimal("0.01")) in {Decimal(p).quantize(Decimal("0.01")) for p in prices if p is not None}
+        return {"retail": sell_levels.own_price(product, line.level), "wholesale": sell_levels.wholesale_price(product, line.level, wholesale)}
+    return {"retail": Decimal(product.price), "wholesale": wholesale}
+
+
+def _line_price(line) -> Decimal:
+    """The price the line was rung at: of one piece, strip, pack or box for a line sold that way, else of one unit."""
+    return Decimal(line.levelPrice) if line.level else Decimal(line.unitPrice)
+
+
+def _own_price(line, product: Product, wholesale_pct: Decimal) -> bool:
+    """Is this line at one of the Item's own prices: its sale price, or its wholesale price? An Item already priced below
+    cost still sells at its own price; any other price below cost is refused."""
+    return _cents(_line_price(line)) in {_cents(p) for p in _own_prices(line, product, wholesale_pct).values() if p is not None}
+
+
+def _check_price(line, product: Product, tier: str | None, wholesale_pct: Decimal, slip: dict | None) -> None:
+    """A line sold on a bill is at the Item's own price for the bill: its sale price on a retail bill, its wholesale price
+    on a wholesale bill (either, from a till that doesn't say which), by the piece, strip, pack or box when sold that way.
+    Whatever comes off it comes through the discounts (the Item's own, the bill's, an approval, the floor): never through a
+    lower price. A price the till had from before a change is refused, so the till fetches the price again."""
+    prices = _own_prices(line, product, wholesale_pct)
+    allowed = [prices[tier]] if tier in prices else list(prices.values())
+    if _cents(_line_price(line)) in {_cents(p) for p in allowed if p is not None}:
+        return
+    if slip is not None:
+        # The slip's own words (services/slips_service.py pay): never naming an Item the person paying may not sell.
+        raise SaleError(f"Slip {slip.get('number')} was printed before a price changed. Ask the Pharmacist to print it again.", PRICE_CHANGED)
+    now = prices[tier] if tier in prices else prices["retail"]
+    what = f"a {line.level} of {product.name}" if line.level else product.name
+    raise SaleError(
+        f"The {'wholesale ' if tier == 'wholesale' else ''}price of {what} changed to {sale_rules.rs(now or ZERO)}. Scan it again.",
+        PRICE_CHANGED,
+    )
+
+
+def _units_exactly(product: Product, level: str | None, level_qty, qty) -> Decimal:
+    """Stocked units in a line, not rounded to the 0.001 stock keeps (1 tablet of a 30-tablet box is 1/30, not 0.033)."""
+    if level in sell_levels.LOOSE and level_qty is not None and sell_levels.pieces_in(product, level):
+        return Decimal(level_qty) * sell_levels.pieces_in(product, level) / sell_levels.pieces_per_unit(product)
+    if level in sell_levels.TOGETHER and level_qty is not None and sell_levels.units_in(product, level):
+        return Decimal(level_qty) * sell_levels.units_in(product, level)
+    return Decimal(qty)
+
+
+async def _paid_on_bill(invoice: str, product: Product, level: str | None) -> tuple[Decimal, Decimal]:
+    """What one of what a return line counts (a stocked unit, or one piece, strip, pack or box) cost the customer on a
+    bill: its price and the discount taken off it there (the Item's own and its share of the bill's). From the bill's lines
+    sold the same way when it has any; otherwise from what a stocked unit cost there. The till works it out the same way
+    (pages/store/Billing.tsx paidEach)."""
+    sale = await SaleRecord.get(invoice_number=invoice)
+    lines = await SaleLine.filter(sale_id=sale.id, product_id=product.id, is_return=False)
+
+    def gross_of(l) -> Decimal:
+        if l.sell_level and l.level_qty is not None and l.level_price is not None:
+            return Decimal(l.level_qty) * Decimal(l.level_price)
+        return Decimal(l.qty) * Decimal(l.unit_price)
+
+    same = [l for l in lines if (l.sell_level or None) == (level or None) and (not level or l.level_qty)]
+    if same:
+        count = sum((Decimal(l.level_qty) if level else Decimal(l.qty) for l in same), ZERO)
+        if count > 0:
+            return sum((gross_of(l) for l in same), ZERO) / count, sum((Decimal(l.disc_amount or 0) for l in same), ZERO) / count
+    units = sum((_units_exactly(product, l.sell_level, l.level_qty, l.qty) for l in lines), ZERO)
+    if units <= 0:
+        return ZERO, ZERO
+    each = _units_exactly(product, level, 1, 1) if level else Decimal("1")
+    return sum((gross_of(l) for l in lines), ZERO) / units * each, sum((Decimal(l.disc_amount or 0) for l in lines), ZERO) / units * each
+
+
+async def _check_return_price(line, product: Product, invoice: str) -> Decimal:
+    """A return line on a bill comes back at what the customer paid for it on the bill it came from, not at today's price:
+    its price there, less the discount it had there. Returns that discount for the line (its whole quantity)."""
+    price, disc = await _paid_on_bill(invoice, product, line.level)
+    # A paisa either way: the till rounds the price to the paisa.
+    if abs(_line_price(line) - price) > CENT + Decimal("0.0001"):
+        what = line.level or (product.unit or "unit").strip() or "unit"
+        raise SaleError(
+            f"{product.name} comes back at what it was sold for on bill {invoice}: {sale_rules.rs(price)} a {what}. "
+            "Take the line off and scan it again.",
+            PRICE_CHANGED,
+        )
+    count = Decimal(line.levelQty) if line.level and line.levelQty is not None else Decimal(line.qty)
+    return (disc * count).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
 def _item_disc(line, product: Product, alias: ProductAlias | None) -> Decimal:
@@ -366,6 +461,17 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
             # Why these Items can't go on this bill is not for this person to know: the till says only that they can't.
             raise SaleError(f"{refused} can't be sold on this bill. Take it off and try again.", status=403)
 
+    # Every line at the Item's own price for the bill (a price is never a discount), and a line coming back at what was
+    # paid for it on the bill it came from, with the discount it had there. A replacement for goods that came back
+    # (Returns, Replace) is priced by the server at what was paid, so it is taken as it is.
+    wholesale_pct = (await masters_service.pricing_stock())["wholesaleDiscountPercent"]
+    return_discs: dict[int, Decimal] = {}
+    for line in payload.lines:
+        if line.isReturn:
+            return_discs[id(line)] = await _check_return_price(line, products[line.productId], returns_of[id(line)])
+        elif not sale_rules.replacing.get():
+            _check_price(line, products[line.productId], payload.tier, wholesale_pct, slip)
+
     # Empty means empty: every Item on the bill must be in stock for its whole quantity. What this same bill takes back
     # (an exchange) is back on the shelf first, so it counts.
     from app.services import stock_guard
@@ -407,11 +513,13 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
     gross = sum((_line_gross(l, l.unitPrice) for l in payload.lines), ZERO)
     # The Item's own discount comes first and needs no one's approval: it's set on the Item. A line
     # rung up by a pack barcode takes that pack's discount instead (flat is per pack).
-    raw_item_discs = [_item_disc(l, products[l.productId], aliases.get(i)) for i, l in enumerate(payload.lines)]
+    # A line coming back takes back the discount it had on its bill, not the Item's discount today.
+    raw_item_discs = [
+        -return_discs[id(l)] if l.isReturn else _item_disc(l, products[l.productId], aliases.get(i)) for i, l in enumerate(payload.lines)
+    ]
     # No discount sells at a loss (services/sale_rules.py): the Item's own discount stops at its floor, an Item already
     # priced at or below cost takes none, and a bill discount (never on Lock Discount Items or on what the bill takes
     # back) is shared by the profit each line has left.
-    wholesale_pct = (await masters_service.pricing_stock())["wholesaleDiscountPercent"]
     bill = sale_rules.figures(
         [
             sale_rules.LineIn(
@@ -494,6 +602,10 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
     if received < net_value:
         raise SaleError(f"Payment not covered. Still to pay: {money_str(net_value - received)}")
     cash_back = max(ZERO, received - net_value)
+    # Change only ever comes out of the cash handed over: a card, wallet, bank, voucher, points or credit payment is for
+    # what is due, never more (dry run B12: a card-only bill gave Rs 0.40 back).
+    if cash_back > payload.tenders.get("CASH", ZERO):
+        raise SaleError("Only cash gives change back. Lower the card, online or other payment to what is due.")
 
     # Members and points. Earned on what the customer actually paid: never on what points paid for.
     details = await _tender_details(payload)
@@ -522,9 +634,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
     if member and loyalty.enabled:
         earned_points = members_service.points_for_amount(net_value - points_amount, loyalty)
 
-    invoice_seq = await next_value("invoice", 143)
-    invoice_number = f"{await invoice_prefix()}-{_invoice_year()}-{invoice_seq:06d}"
-    fbr_invoice_number = f"7000-{invoice_number[-8:]}"
+    invoice_number = await next_invoice_number()
     credit_amount = payload.tenders.get("CREDIT", ZERO)
     is_credit_sale = credit_amount > 0
 
@@ -561,7 +671,9 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
         received=received,
         cash_back=cash_back,
         is_credit_sale=is_credit_sale,
-        fbr_invoice_number=fbr_invoice_number,
+        # Filled below once the bill is written (services/fbr_service.py): a test number in dummy mode, FBR's own number
+        # once FBR has taken it. Empty until then, and on a branch with FBR invoices off.
+        fbr_invoice_number="",
         client_request_id=payload.clientRequestId,
         # The pharmacy slip this sale is the payment of, and the Pharmacist who made it.
         slips=[slip] if slip is not None else None,
@@ -627,6 +739,12 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
 
     await scan_history_service.mark_sold(payload.clientRequestId, invoice_number)
 
+    # The bill's FBR invoice, in this same transaction: a test number in dummy mode, or the invoice ready to go to FBR
+    # once the bill has committed. It is never sent from inside the sale, so FBR can't hold up the till.
+    from app.services import fbr_service
+
+    await fbr_service.issue_for_sale(sale)
+
     await OutboxEvent.create(
         aggregate_type="SaleRecord",
         aggregate_id=str(sale.id),
@@ -648,12 +766,25 @@ async def find_by_invoice(invoice_number: str) -> SaleRecord | None:
     return sale
 
 
+async def sees_every_bill(user: User) -> bool:
+    """Who sees every bill of the branch: those who see every till (a Branch Manager, the Counter board, Staff on duty:
+    services/till_service.py sees_all_tills), and those given Reports or the Dashboard, whose figures are the whole
+    branch's. Anyone else sees only the bills they rang themselves: no salesperson sees another's till, or its bills. A
+    single bill looked up by its number (for a return, or a reprint) is not a list, and stays open to them."""
+    from app.services import till_service
+    from app.services.rbac_service import has_permission
+
+    if await till_service.sees_all_tills(user):
+        return True
+    return await has_permission(user, "reports", "R") or await has_permission(user, "branch-console.dashboard", "R")
+
+
 async def list_sales(
-    from_at: datetime | None, to_at: datetime | None, limit: int, offset: int
+    from_at: datetime | None, to_at: datetime | None, limit: int, offset: int, cashier_id=None,
 ) -> tuple[list[SaleRecord], int]:
     """Branch-wide, not terminal-scoped: the read path X/Z, the Dashboard and Reports need
-    instead of each browser's own local sales journal."""
-    qs = SaleRecord.all()
+    instead of each browser's own local sales journal. `cashier_id` keeps it to one person's bills (sees_every_bill)."""
+    qs = SaleRecord.all() if cashier_id is None else SaleRecord.filter(cashier_id=cashier_id)
     if from_at:
         qs = qs.filter(at__gte=from_at)
     if to_at:

@@ -123,9 +123,13 @@ async def _detail(m: Member) -> MemberDetailOut:
 
 
 @router.get("/members", response_model=MemberListOut)
-async def list_members(q: str | None = None, limit: int = 50, offset: int = 0, user: User = Depends(_read)) -> MemberListOut:
-    """Search by member code, name or mobile number; newest members first."""
-    items, total = await members_service.search(q, min(max(limit, 1), 200), max(offset, 0))
+async def list_members(
+    q: str | None = None, limit: int = 50, offset: int = 0, sort: str | None = None, order: str | None = None,
+    user: User = Depends(_read),
+) -> MemberListOut:
+    """Search by member code, name or mobile number; newest members first unless `sort` names a column (see
+    members_service.SORTS) and `order` is asc or desc."""
+    items, total = await members_service.search(q, min(max(limit, 1), 200), max(offset, 0), sort, order)
     return MemberListOut(items=[_member_out(m) for m in items], total=total)
 
 

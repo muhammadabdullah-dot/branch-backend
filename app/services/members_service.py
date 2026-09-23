@@ -110,7 +110,16 @@ async def get(code: str) -> Member:
     return member
 
 
-async def search(q: str | None, limit: int, offset: int) -> tuple[list[Member], int]:
+# The Members screen's sort keys and what they sort by. Status reads Active before Switched off, as the column does.
+SORTS = {
+    "code": "code", "name": "name", "phone": "phone", "points": "points_balance", "joinedVia": "joined_via",
+    "branch": "home_branch_code", "party": "party__name", "status": "-active", "joined": "created_at",
+}
+
+
+async def search(
+    q: str | None, limit: int, offset: int, sort: str | None = None, order: str | None = None,
+) -> tuple[list[Member], int]:
     qs = Member.all()
     text = (q or "").strip()
     if text:
@@ -120,7 +129,11 @@ async def search(q: str | None, limit: int, offset: int) -> tuple[list[Member], 
             predicate |= Q(phone__endswith=digits[-10:] if len(digits) > 10 else digits)
         qs = qs.filter(predicate)
     total = await qs.count()
-    items = await qs.order_by("-created_at").offset(offset).limit(limit).prefetch_related("party")
+    field = SORTS.get(sort or "")
+    if field and order == "desc":
+        field = field[1:] if field.startswith("-") else f"-{field}"
+    ordering = (field, "id") if field else ("-created_at",)
+    items = await qs.order_by(*ordering).offset(offset).limit(limit).prefetch_related("party")
     return items, total
 
 

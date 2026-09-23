@@ -14,6 +14,7 @@ from app.models.activity import ActivityLog
 from app.models.catalog import PaymentMethod, Product, ProductAlias, ProductPriceChange, ProductSupplier
 from app.models.corrections import Adjustment, PhysicalCount
 from app.models.device import Device
+from app.models.fbr import FbrInvoice, FbrSettings
 from app.models.fixed_assets import DepreciationRun, DepreciationRunLine, FixedAsset
 from app.models.gift_voucher import GiftVoucher, VoucherRedemption
 from app.models.grn import GRN, Batch, GRNLine
@@ -54,6 +55,8 @@ __all__ = [
     "CustomerPayment",
     "Voucher",
     "VoucherLine",
+    "FbrInvoice",
+    "FbrSettings",
     "FixedAsset",
     "DepreciationRun",
     "DepreciationRunLine",

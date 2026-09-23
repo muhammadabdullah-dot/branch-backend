@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     # The built app this server hands out on its own port. Blank = the app's dist/ folder in this
     # repo (branch-app/dist); a path = that folder; "off" = API only.
     frontend_dir: str = ""
+    # The sample Items, stock, suppliers, parties, gift vouchers and second sign-in a new database gets on its first
+    # start. DEMO_DATA=off starts it with only what the software needs to run (a fresh test, a real new branch). Once a
+    # database has started without demo data it never gets any, whatever this says later (seed_service.demo_data_wanted).
+    demo_data: bool = True
 
     # --- Sync scheduler ------------------------------------------------------------------------
     # Every two hours, as agreed. The retry interval is shorter on purpose: "sync whenever the

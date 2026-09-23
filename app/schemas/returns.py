@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.fbr import FbrStampOut
 from app.schemas.sales import MemberIn, ReturnLineIn, SaleRecordOut, TenderDetailIn
 from app.schemas.types import Money, Qty
 
@@ -83,9 +84,12 @@ class ReturnReceiptOut(BaseModel):
     remark: str | None = None
     cashierName: str | None = None
     tillLabel: str | None = None
-    # Replace and exchange: the bill the Items going out were rung on.
+    # The return's own FBR invoice, a credit note against the bill. None on returns from before FBR invoices were kept.
+    fbr: FbrStampOut | None = None
+    # Replace and exchange: the bill the Items going out were rung on, and its FBR invoice.
     exchangeInvoice: str | None = None
     exchangeFbrInvoice: str | None = None
+    exchangeFbr: FbrStampOut | None = None
     exchangeLines: list[ReturnReceiptLineOut] = []
     exchangeGst: Money | None = None
     exchangeDiscount: Money | None = None

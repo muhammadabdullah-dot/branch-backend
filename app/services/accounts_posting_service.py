@@ -188,7 +188,7 @@ async def _sales_days(run: Run) -> None:
     loyalty = await _loyalty_settings()
     point_value = Decimal(loyalty.point_value) if loyalty else ZERO
     if point_value:
-        for entry in await LoyaltyEntry.filter(at__gte=lo, at__lt=hi, branch_code=code, kind__in=["earn", "reverse", "adjust"]):
+        for entry in await LoyaltyEntry.filter(at__gte=lo, at__lt=hi, branch_code=code, kind__in=["earn", "reverse", "adjust"]).order_by("at", "id"):
             value = Decimal(entry.points) * point_value
             if not value:
                 continue
@@ -225,12 +225,13 @@ async def _tills(run: Run) -> None:
     lo, hi = bounds(run.start, run.end)
     acc = run.accounts
     counter, safe = await acc.key("cash.counter"), await acc.key("cash.main")
-    for till in await TillSession.filter(opened_at__gte=lo, opened_at__lt=hi):
+    # Every source is read oldest first, so its vouchers are numbered in the order things happened.
+    for till in await TillSession.filter(opened_at__gte=lo, opened_at__lt=hi).order_by("opened_at", "session_number"):
         if till.opening_float:
             await run.put(f"till-open:{till.id}", "TV", shop_day(till.opened_at),
                           [(counter, Decimal(till.opening_float), ZERO, "Opening float"), (safe, ZERO, Decimal(till.opening_float), "Opening float")],
                           f"Till {till.session_number} opened with its float", till.session_number, counter)
-    for till in await TillSession.filter(status="closed", closed_at__gte=lo, closed_at__lt=hi):
+    for till in await TillSession.filter(status="closed", closed_at__gte=lo, closed_at__lt=hi).order_by("closed_at", "session_number"):
         expected = Decimal(till.opening_float)
         # This drawer's own bills. Several tills can be open at once, so a bill rung at the next counter during the
         # same hours is not this drawer's cash. Drawers opened before bills carried their till also take the bills
@@ -272,7 +273,7 @@ async def _cash_movements(run: Run) -> None:
     lo, hi = bounds(run.start, run.end)
     acc = run.accounts
     counter = await acc.key("cash.counter")
-    for movement in await CashMovement.filter(at__gte=lo, at__lt=hi).prefetch_related("account", "till_session"):
+    for movement in await CashMovement.filter(at__gte=lo, at__lt=hi).order_by("at", "id").prefetch_related("account", "till_session"):
         amount = Decimal(movement.amount)
         what = movement.account
         note = (movement.notes or "").strip()
@@ -293,7 +294,7 @@ async def _customer_payments(run: Run) -> None:
     lo, hi = bounds(run.start, run.end)
     acc = run.accounts
     # A voided payment's voucher was taken out when it was voided; a full run drops any left behind (not seen).
-    for payment in await CustomerPayment.filter(at__gte=lo, at__lt=hi, method__not="CASH", voided_at__isnull=True).prefetch_related("party"):
+    for payment in await CustomerPayment.filter(at__gte=lo, at__lt=hi, method__not="CASH", voided_at__isnull=True).order_by("at", "number").prefetch_related("party"):
         money_acc = await acc.tender(payment.method, run.settings.tender_accounts or {}, payment.reference)
         await run.put(f"customer-payment:{payment.id}", "BRV", shop_day(payment.at),
                       [(money_acc, Decimal(payment.amount), ZERO, "__header__"), (await acc.customer(payment.party), ZERO, Decimal(payment.amount), payment.reference)],
@@ -310,7 +311,7 @@ def grn_line_net(line) -> Decimal:
 async def _grns(run: Run) -> None:
     lo, hi = bounds(run.start, run.end)
     acc = run.accounts
-    for grn in await GRN.filter(at__gte=lo, at__lt=hi).prefetch_related("lines", "supplier"):
+    for grn in await GRN.filter(at__gte=lo, at__lt=hi).order_by("at", "grn_number").prefetch_related("lines", "supplier"):
         net = sum((grn_line_net(l) for l in grn.lines), ZERO)
         gst = sum((grn_line_net(l) * Decimal(l.tax_rate or 0) / Decimal("100") for l in grn.lines), ZERO)
         advance = Decimal(grn.advance_tax or 0)
@@ -328,7 +329,7 @@ async def _grns(run: Run) -> None:
 async def _purchase_returns(run: Run) -> None:
     lo, hi = bounds(run.start, run.end)
     acc = run.accounts
-    for ret in await PurchaseReturn.filter(at__gte=lo, at__lt=hi).prefetch_related("lines__product", "supplier"):
+    for ret in await PurchaseReturn.filter(at__gte=lo, at__lt=hi).order_by("at", "return_number").prefetch_related("lines__product", "supplier"):
         value = sum((Decimal(l.qty) * Decimal(l.unit_price) for l in ret.lines), ZERO)
         tax = sum((Decimal(l.qty) * Decimal(l.unit_price) * Decimal(l.tax_rate if l.tax_rate is not None else l.product.tax_rate or 0) / Decimal("100") for l in ret.lines), ZERO)
         cost = sum((_cost(l.qty, l.unit_cost, l.product) for l in ret.lines), ZERO)
@@ -352,7 +353,7 @@ async def _stock_corrections(run: Run) -> None:
     stock = await acc.key("stock.main")
     days: dict[date, list] = defaultdict(list)
     items: Counter = Counter()
-    for m in await StockMovement.filter(at__gte=lo, at__lt=hi, kind__in=["count-correction", "adjust"]).prefetch_related("product"):
+    for m in await StockMovement.filter(at__gte=lo, at__lt=hi, kind__in=["count-correction", "adjust"]).order_by("at", "id").prefetch_related("product"):
         value = _cost(m.qty, m.unit_cost, m.product)
         if not value:
             continue
@@ -379,7 +380,7 @@ async def _transfers(run: Run) -> None:
     acc = run.accounts
     stock, transit, head_office = await acc.key("stock.main"), await acc.key("stock.transit"), await acc.key("interoffice.head_office")
     lo, _ = bounds(run.settings.books_start, run.end)
-    for transfer in await Transfer.exclude(origin="local").prefetch_related("lines__product"):
+    for transfer in await Transfer.exclude(origin="local").order_by("requested_at", "number").prefetch_related("lines__product"):
         lines = list(transfer.lines)
         received = transfer.status in ("received", "received_short")
         if transfer.direction == "outbound":
@@ -413,7 +414,7 @@ async def _gift_vouchers(run: Run) -> None:
     lo, hi = bounds(run.start, run.end)
     acc = run.accounts
     outstanding = await acc.key("liab.gift_vouchers")
-    for voucher in await GiftVoucher.filter(issued_at__gte=lo, issued_at__lt=hi):
+    for voucher in await GiftVoucher.filter(issued_at__gte=lo, issued_at__lt=hi).order_by("issued_at", "id"):
         method = (voucher.paid_by or "").upper()
         if method == "CASH":
             continue  # came in through the till as a Cash In
@@ -428,7 +429,7 @@ async def _gift_vouchers(run: Run) -> None:
                       [(debit, amount, ZERO, label), (outstanding, ZERO, amount, f"Voucher {voucher.code}")],
                       f"Gift voucher {voucher.code} issued" + (f" to {voucher.issued_to_name}" if voucher.issued_to_name else ""), voucher.code)
     now = datetime.now(timezone.utc)
-    for voucher in await GiftVoucher.filter(expires_at__gte=lo, expires_at__lt=min(hi, now), balance__gt=0).exclude(status="cancelled"):
+    for voucher in await GiftVoucher.filter(expires_at__gte=lo, expires_at__lt=min(hi, now), balance__gt=0).exclude(status="cancelled").order_by("expires_at", "id"):
         amount = Decimal(voucher.balance)
         await run.put(f"gift-voucher-expiry:{voucher.id}", "GVV", shop_day(voucher.expires_at),
                       [(outstanding, amount, ZERO, f"Voucher {voucher.code} expired"), (await acc.key("income.voucher_expiry"), ZERO, amount, f"Voucher {voucher.code} expired")],
@@ -440,7 +441,7 @@ async def _cheques(run: Run) -> None:
 
     acc = run.accounts
     in_hand = await acc.key("cash.cheques")
-    for cheque in await Cheque.filter(received_on__gte=run.settings.books_start).prefetch_related("party_account", "bank_account"):
+    for cheque in await Cheque.filter(received_on__gte=run.settings.books_start).order_by("received_on", "created_at").prefetch_related("party_account", "bank_account"):
         amount = Decimal(cheque.amount)
         source = f"cheque-received:{cheque.id}"
         if cheque.status == "cancelled":

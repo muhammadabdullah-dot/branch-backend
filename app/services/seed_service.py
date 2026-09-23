@@ -109,8 +109,60 @@ USERS = [
 ]
 
 
+DEMO_OFF_MARK = "demo-data:off"
+
+
+async def demo_data_wanted() -> bool:
+    """False once this database has been started with DEMO_DATA=off (config.py), and from then on: the choice is the
+    database's, so a later start that forgets the switch still adds no demo data and no ready-made counter. Every
+    database that was never started with it off (live, development) answers True, exactly as before the switch."""
+    from app.core.config import settings
+    from app.models import Counter
+
+    if await Counter.exists(id=DEMO_OFF_MARK):
+        return False
+    if settings.demo_data:
+        return True
+    await Counter.create(id=DEMO_OFF_MARK, value=1)
+    return False
+
+
+async def _seed_without_demo_data() -> None:
+    """DEMO_DATA=off: only what a branch can't run without, nothing a person would have typed in. The payment methods
+    (every bill is paid by one), the Main Store (sales, returns and receipts go through loc-1: stock_guard
+    SELLING_LOCATION_ID), the walk-in party (a bill with no customer is the walk-in's: sales_service._resolve_party), the
+    three starting points, and one Branch Manager to sign in and add everyone else. The chart of accounts comes from
+    ensure_standard_chart at startup as it always does; Items, suppliers, stock, parties and counters are staff's."""
+    for code, name, kind in PAYMENT_METHODS:
+        await PaymentMethod.create(code=code, name=name, kind=kind)
+    for id_, name, kind, priority in LOCATIONS[:1]:
+        await Location.create(id=id_, name=name, kind=kind, priority=priority)
+    await Party.create(
+        id="00000000-0000-0000-0000-000000000000", code="CASH", name="Walk-in Party", is_walk_in=True,
+        due_days=0, credit_allowed=False, credit_limit=Decimal("0"), credit_balance=Decimal("0"),
+        tier="retail", active=True,
+    )
+    for role_id, name, landing in ROLES:
+        role = await Role.create(id=role_id, name=name, landing=landing)
+        for resource, actions in preset_grants(role_id).items():
+            await RoleDefaultPermission.create(role=role, resource=resource, can_read="R" in actions, can_write="W" in actions, can_execute="X" in actions)
+    for email, password, role_id, name in USERS:
+        if role_id != BRANCH_MANAGER:
+            continue
+        user = await User.create(
+            name=name, email=email.lower(), password_hash=hash_password(password), role_id=role_id,
+            title=PRESETS[role_id]["label"], discount_limit=PRESETS[role_id]["discountLimit"],
+        )
+        for template in await RoleDefaultPermission.filter(role_id=role_id):
+            await UserPermission.create(user=user, resource=template.resource, can_read=template.can_read,
+                                        can_write=template.can_write, can_execute=template.can_execute, granted_by=None)
+
+
 async def seed_if_empty() -> None:
     if await Role.exists():
+        return
+    if not await demo_data_wanted():
+        await _seed_without_demo_data()
         return
 
     for id_, sku, name, price, tax_rate, is_weighed, unit, barcode, pack_unit, pack_size in PRODUCTS:
@@ -343,6 +395,33 @@ async def drop_pharmacist_money_ticks() -> int:
         await strip(row)
     for user_id in changed:
         await staff_sync_service.emit(user_id)
+    return len(changed)
+
+
+SALESPERSON_OWN_TILL_MARK = "rollout:salesperson-own-till"
+
+
+async def take_counter_oversight_off_salespeople() -> int:
+    """Once: the Counter board and Staff on duty come off every Salesperson, and off the Salesperson starting point's
+    standard access (owner, 21 Sep: a Salesperson holds what the branch's own Salesperson account holds, "not even
+    counter or staff on duty"). Both show every till, and the Counter board also works them (services/till_service.py),
+    so a Salesperson holding either would see other people's drawers. Every other tick stays, even one given on
+    purpose, and a Branch Manager can tick either back for someone. Anyone changed goes to head office. Runs once."""
+    from app.core.abilities import SALESPERSON, SALESPERSON_DROPPED
+    from app.models import Counter
+    from app.services import staff_sync_service
+
+    if await Counter.exists(id=SALESPERSON_OWN_TILL_MARK):
+        return 0
+    dropped = list(SALESPERSON_DROPPED)
+    people = list(await User.filter(role_id=SALESPERSON).values_list("id", flat=True))
+    changed = set(await UserPermission.filter(user_id__in=people, resource__in=dropped).values_list("user_id", flat=True))
+    if changed:
+        await UserPermission.filter(user_id__in=list(changed), resource__in=dropped).delete()
+    await RoleDefaultPermission.filter(role_id=SALESPERSON, resource__in=dropped).delete()
+    for user_id in changed:
+        await staff_sync_service.emit(user_id)
+    await Counter.create(id=SALESPERSON_OWN_TILL_MARK, value=1)
     return len(changed)
 
 

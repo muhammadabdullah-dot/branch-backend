@@ -31,7 +31,7 @@ async def list_products(
     sort: str | None = None, order: str | None = None, supplierId: str | None = None, needsDetails: bool | None = None,
     user: User = Depends(_read),
 ) -> ProductListOut:
-    """`sort` is one of sku, name, brand, category, price, taxRate, unit, avgCost; `order` is asc
+    """`sort` is one of sku, name, brand, category, price, taxRate, unit, avgCost, aliases; `order` is asc
     (default) or desc. `supplierId` narrows to the Items linked to that supplier on the Item form."""
     # `ids` is a comma-separated set the caller already knows it needs; the page cap still applies,
     # so a caller asking for more than 200 at once gets a page of them, not a silent truncation.
@@ -87,12 +87,14 @@ _item_history = require_any_permission(("inventory.catalog", "R"), ("reports.pri
 async def price_history_report(
     from_: datetime | None = Query(None, alias="from"), to: datetime | None = None, department: str | None = None,
     userId: str | None = None, source: str | None = None, field: str | None = None, q: str | None = None,
-    limit: int = 100, offset: int = 0, user: User = Depends(_price_report),
+    limit: int = 100, offset: int = 0, sort: str | None = None, order: str | None = None,
+    user: User = Depends(_price_report),
 ) -> PriceChangesReportOut:
     """Every change to a sale, retail or wholesale price, cost or Item discount in the window, newest first.
-    `userId=none` is changes nobody made by hand. `limit` up to 20000 for an export."""
+    `userId=none` is changes nobody made by hand. `limit` up to 20000 for an export. `sort`: at, sku, name,
+    department, field, oldValue, newValue, change, changedBy, source; `order`: asc or desc."""
     return await price_history_controller.report(
-        from_, to, department, userId, source, field, q, min(max(limit, 1), 20000), max(offset, 0),
+        from_, to, department, userId, source, field, q, min(max(limit, 1), 20000), max(offset, 0), sort, order,
     )
 
 

@@ -69,12 +69,15 @@ async def analysis_abc(
     basis: str = Query("sales", pattern="^(sales|profit|units)$"), department: str | None = None, category: str | None = None,
     brand: str | None = None, supplierId: str | None = None, abcClass: str | None = Query(None, pattern="^[ABCabc]$"),
     xyzClass: str | None = None, cell: str | None = None, q: str | None = None,
+    sort: str | None = None, order: str | None = None,
     limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0), user: User = Depends(_analysis),
 ) -> dict:
-    """Items ranked by sales value, gross profit or units, with their A/B/C and X/Y/Z classes, a page at a time."""
+    """Items ranked by sales value, gross profit or units, with their A/B/C and X/Y/Z classes, a page at a time.
+    `sort` is a column (rank, name, code, department, units, sales, profit, share, before, abc, xyz) and `order` asc
+    or desc; the whole list is sorted before it is paged. Without one, biggest first."""
     p = _period(period, from_, to, "last6m")
     scope = branch_analytics_service.scope_from(department, category, brand, supplierId)
-    return await _answer(branch_analytics_service.abc(p, basis, scope, abcClass, xyzClass, cell, q, limit, offset))
+    return await _answer(branch_analytics_service.abc(p, basis, scope, abcClass, xyzClass, cell, q, limit, offset, sort, order))
 
 
 @router.get("/analysis/xyz")
@@ -82,12 +85,14 @@ async def analysis_xyz(
     period: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None,
     basis: str = Query("sales", pattern="^(sales|profit|units)$"), department: str | None = None, category: str | None = None,
     brand: str | None = None, supplierId: str | None = None, xyzClass: str | None = None, q: str | None = None,
+    sort: str | None = None, order: str | None = None,
     limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0), user: User = Depends(_analysis),
 ) -> dict:
-    """Items by how steadily they sell, steadiest first."""
+    """Items by how steadily they sell, steadiest first. `sort` is a column (name, code, xyz, cv, perBucket,
+    bucketsSold, units, sales, abc, since) and `order` asc or desc; the whole list is sorted before it is paged."""
     p = _period(period, from_, to, "last6m")
     scope = branch_analytics_service.scope_from(department, category, brand, supplierId)
-    return await _answer(branch_analytics_service.xyz(p, basis, scope, xyzClass, q, limit, offset))
+    return await _answer(branch_analytics_service.xyz(p, basis, scope, xyzClass, q, limit, offset, sort, order))
 
 
 @router.get("/analysis/matrix")
@@ -106,13 +111,15 @@ async def analysis_matrix(
 async def analysis_sold_least(
     period: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None,
     department: str | None = None, category: str | None = None, brand: str | None = None, supplierId: str | None = None,
-    q: str | None = None, sort: str = Query("units", pattern="^(units|stockValue|cover)$"), unsoldOnly: bool = False,
+    q: str | None = None, sort: str = "units", order: str | None = None, unsoldOnly: bool = False,
     limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0), user: User = Depends(_analysis),
 ) -> dict:
-    """Every Item on the shelf or sold in the period, least sold first, including stocked Items that didn't sell."""
+    """Every Item on the shelf or sold in the period, least sold first, including stocked Items that didn't sell.
+    `sort` alone is one of the picker's orders (units, stockValue, cover). With `order` (asc or desc) it is a column:
+    name, code, department, supplier, units, sales, lastSold, onHand, stockValue or cover."""
     p = _period(period, from_, to, "last6m")
     scope = branch_analytics_service.scope_from(department, category, brand, supplierId)
-    return await _answer(branch_analytics_service.sold_least(p, scope, q, sort, limit, offset, unsoldOnly))
+    return await _answer(branch_analytics_service.sold_least(p, scope, q, sort, limit, offset, unsoldOnly, order))
 
 
 @router.get("/analysis/items/{product_id}")

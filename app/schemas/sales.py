@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.fbr import FbrStampOut
 from app.schemas.types import Money, Percent, Qty
 
 
@@ -52,6 +53,9 @@ class SaleCreateRequest(BaseModel):
     # Keyed by tender code, for the tenders that carry details (CARD, EASYPAISA, JAZZCASH, BANK).
     tenderDetails: dict[str, TenderDetailIn] = {}
     lines: list[SaleLineIn]
+    # Retail or wholesale: which of the Item's own prices the bill's lines are at (services/sales_service.py _check_price).
+    # Left out, either is taken.
+    tier: Literal["retail", "wholesale"] | None = None
     discPercent: Decimal = Decimal("0")
     flatDisc: Decimal = Decimal("0")
     fare: Decimal = Decimal("0")
@@ -156,7 +160,10 @@ class SaleRecordOut(BaseModel):
     received: Money
     cashBack: Money
     isCreditSale: bool
+    # The number the receipt prints as the FBR invoice: a test number, FBR's own number, or empty while waiting for FBR.
     fbrInvoiceNumber: str
+    # The receipt's whole FBR block: which of those it is, the counter's POS ID (services/fbr_service.py).
+    fbr: FbrStampOut | None = None
     # The pharmacy slip this bill is the payment of (earlier bills could carry several). Empty on most bills.
     slips: list[SaleSlipOut] = []
 

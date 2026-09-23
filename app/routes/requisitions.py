@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from app.middlewares.auth import require_permission
 from app.models import Transfer, User
 from app.schemas.requisitions import (
+    CompanyItemOut,
     CoverOut,
     SourceOut,
     StockRequestIn,
@@ -40,7 +41,9 @@ async def _out(requests: list) -> list[StockRequestOut]:
             transferDisputeOpen=bool(shipment and shipment.dispute_open),
             lines=[
                 StockRequestLineOut(
-                    productId=str(l.product_id), productName=l.product.name, productSku=l.product.sku, unit=l.product.unit,
+                    productId=str(l.product_id) if l.product_id else None,
+                    productName=l.product.name if l.product else l.name, productSku=l.product.sku if l.product else l.sku,
+                    unit=l.product.unit if l.product else l.unit,
                     qtyRequested=l.qty_requested, qtyApproved=l.qty_approved, onHand=l.on_hand, dailySales=l.daily_sales,
                 )
                 for l in r.lines
@@ -74,6 +77,16 @@ async def suggestions(limit: int = 50, user: User = Depends(_read)) -> list[Sugg
     return [SuggestionOut(**row) for row in await requisition_service.suggestions(limit)]
 
 
+@router.get("/company-items", response_model=list[CompanyItemOut])
+async def company_items(q: str, limit: int = 30, user: User = Depends(_write)) -> list[CompanyItemOut]:
+    """Search every Item the company has (head office's list, asked live), for a stock request: a new branch can ask
+    for Items it doesn't carry yet. Needs head office to be reachable."""
+    try:
+        return [CompanyItemOut(**row) for row in await requisition_service.company_items(q, limit)]
+    except RequestError as exc:
+        raise _fail(exc)
+
+
 @router.get("/sources", response_model=list[SourceOut])
 async def sources(user: User = Depends(_read)) -> list[SourceOut]:
     """The other branches that can be asked, as head office last listed them. Head office's godown is always there."""
@@ -92,7 +105,7 @@ async def one(request_id: str, user: User = Depends(_read)) -> StockRequestOut:
 async def create(payload: StockRequestIn, user: User = Depends(_write)) -> StockRequestOut:
     try:
         saved = await requisition_service.save_draft(
-            user, None, payload.sourceCode, payload.reason, payload.neededBy, [(l.productId, l.qty) for l in payload.lines],
+            user, None, payload.sourceCode, payload.reason, payload.neededBy, [l.model_dump() for l in payload.lines],
         )
     except RequestError as exc:
         raise _fail(exc)
@@ -103,7 +116,7 @@ async def create(payload: StockRequestIn, user: User = Depends(_write)) -> Stock
 async def update(request_id: str, payload: StockRequestIn, user: User = Depends(_write)) -> StockRequestOut:
     try:
         await requisition_service.save_draft(
-            user, request_id, payload.sourceCode, payload.reason, payload.neededBy, [(l.productId, l.qty) for l in payload.lines],
+            user, request_id, payload.sourceCode, payload.reason, payload.neededBy, [l.model_dump() for l in payload.lines],
         )
     except RequestError as exc:
         raise _fail(exc)

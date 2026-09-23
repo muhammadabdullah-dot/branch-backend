@@ -3,7 +3,9 @@ from decimal import Decimal, InvalidOperation
 from tortoise.expressions import Q
 from tortoise.transactions import atomic
 
-from app.models import Party, PartyContact, next_value
+from app.models import Party, PartyContact
+# Customer codes start at CUST001 on a new system and carry on after the highest one on a system with data.
+from app.services.numbering_service import next_number
 from app.schemas.import_result import ImportRowError, ImportSummary
 from app.schemas.parties import PartyContactIn, PartyCreate, PartyUpdate
 from app.services import media_service
@@ -79,8 +81,7 @@ async def list_all(include_inactive: bool = False) -> list[Party]:
 
 
 async def create(data: PartyCreate) -> Party:
-    seq = await next_value("party_code", 3)
-    code = f"CUST{seq:03d}"
+    code = await next_number("party_code", Party, "code", "CUST", 3)
     fields = _to_model_fields(data.model_dump())
     await _refuse_switched_off_group(fields)
     return await Party.create(code=code, is_walk_in=False, credit_balance=Decimal("0"), active=True, **fields)
@@ -215,8 +216,7 @@ async def import_parties(filename: str, content: bytes) -> ImportSummary:
             else:
                 fields = _to_model_fields(data.model_dump())
                 if not code:
-                    seq = await next_value("party_code", 3)
-                    code = f"CUST{seq:03d}"
+                    code = await next_number("party_code", Party, "code", "CUST", 3)
                 await Party.create(code=code, is_walk_in=False, credit_balance=Decimal("0"), active=True, **fields)
                 created += 1
         except (ValueError, InvalidOperation, KeyError) as exc:

@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.fbr import FbrStampOut
 from app.schemas.sales import SaleLineIn, SaleLineOut, TenderDetailIn
 from app.schemas.types import Money
 
@@ -107,6 +108,8 @@ class SlipPaidOut(BaseModel):
     madeByName: str | None = None
     itemCount: int
     tenders: list[SlipTenderOut]
+    # The FBR invoice of the bill the payment made, for the paid note (services/fbr_service.py).
+    fbr: FbrStampOut | None = None
 
 
 class SlipCancelIn(BaseModel):

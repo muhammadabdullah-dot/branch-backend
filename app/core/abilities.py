@@ -40,9 +40,12 @@ ABILITIES: list[tuple[str, str, str, str, str]] = [
     ("counter", "store.gift-vouchers", "R", "See gift vouchers", ""),
     ("counter", "store.gift-vouchers", "W", "Take gift vouchers as payment", ""),
     ("counter", "store.gift-vouchers", "X", "Issue gift vouchers", ""),
-    ("counter", "store.counters", "R", "Counter board", "Which counters are open, who is on each and what they've taken."),
+    ("counter", "store.counters", "R", "Counter board",
+     "Which counters are open, who is on each and what they've taken. It also opens every till to them: its X and Z, and, "
+     "with the till tick, closing it and cash in and out."),
     ("counter", "store.counters", "W", "Put people on counters", "Assign and change who works which counter, and add counters."),
-    ("counter", "store.staff-on-duty", "R", "Staff on duty", "Who is on the floor now, since when, and what they've rung."),
+    ("counter", "store.staff-on-duty", "R", "Staff on duty",
+     "Who is on the floor now, since when, and what they've rung. Also sees every till's X and Z report."),
     ("counter", "store.reprint", "X", "Reprint a receipt", "Print a bill made earlier again. It prints marked REPRINT with who and when."),
     ("counter", "store.sell-past-zero", "X", "Sell when stock shows zero",
      "Goods are on the shelf but their delivery isn't entered yet. Billing warns but sells; the Item shows on Sold without stock until the delivery is received."),
@@ -236,12 +239,15 @@ MANAGER_ONLY_RESOURCES = frozenset({"branch-console.staff", "branch-console.staf
 MANAGER_ONLY_GRANTS = {("branch-console.staff", "R"), ("branch-console.staff-access", "R"), ("branch-console.staff-access", "W"),
                        ("branch-console.backup.restore", "R"), ("branch-console.backup.restore", "X")}
 
-# The counter work a Salesperson starts with.
+# The counter work a Salesperson starts with: exactly what the branch's own Salesperson account holds (owner, 21 Sep).
+# Their own till and its X and Z, and gift vouchers taken as payment. Issuing gift vouchers, the Counter board and
+# Staff on duty are not a Salesperson's: those two show every till, and every till is a Branch Manager's to oversee.
 _COUNTER_WORK = {
     ("store.billing", "R"), ("store.billing", "W"), ("store.hold-recall", "W"), ("store.returns", "W"),
-    ("store.till", "W"), ("store.xz", "R"), ("store.gift-vouchers", "W"), ("store.gift-vouchers", "X"),
-    ("store.counters", "R"), ("store.staff-on-duty", "R"),
+    ("store.till", "W"), ("store.xz", "R"), ("store.gift-vouchers", "R"), ("store.gift-vouchers", "W"),
 }
+# Taken off every Salesperson once when the preset lost them (seed_service.take_counter_oversight_off_salespeople).
+SALESPERSON_DROPPED = frozenset({"store.counters", "store.staff-on-duty"})
 # A Pharmacist looks Items up and prints slips. The Counter board is there so they can tell the customer which cash
 # counter is open.
 _SLIP_WORK = {("store.billing", "R"), ("store.slips", "W"), ("store.counters", "R")}

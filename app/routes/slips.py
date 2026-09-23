@@ -66,11 +66,17 @@ async def find_slip(code: str, user: User = Depends(_take)) -> SlipOut:
 async def pay_pharmacy_slip(code: str, payload: SlipPayIn, user: User = Depends(_take)) -> SlipPaidOut:
     """The slip's payment, on its own: never onto a bill. Cash, card or online, into this person's till. Sending the
     same payment again hands back the one already taken."""
+    from app.services import fbr_service
+
     try:
         slip, sale = await slips_service.pay(user, code, payload)
     except slips_service.SlipError as exc:
         raise _raise(exc) from exc
-    return slips_service.paid_out(slip, sale)
+    # The payment's bill has committed: one short try to get its FBR number onto the paid note.
+    await fbr_service.send_after_commit(sales=[sale])
+    out = slips_service.paid_out(slip, sale)
+    out.fbr = await fbr_service.stamp_for_sale(sale)
+    return out
 
 
 @router.post("/{slip_id}/cancel", response_model=SlipOut)

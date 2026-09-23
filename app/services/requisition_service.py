@@ -8,18 +8,24 @@
      down; an approval arrives together with the transfer it became, which this branch receives as usual.
 
 A request that has been sent can be withdrawn until head office decides. A draft can be thrown away.
+
+A request can ask for any Item the company has, not only the ones this branch carries: the new-request window searches
+head office's list live (`company_items`). A line for an Item this branch doesn't carry yet goes by its code, name and
+unit, with no Item of its own here; the Item joins this branch's list when stock of it comes.
 """
 import math
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
+import httpx
 from tortoise.functions import Sum
 from tortoise.transactions import atomic
 
 from app.core.pk_time import today_pk
 from app.core.device_context import get_device_id
-from app.models import KnownBranch, OutboxEvent, Product, ReturnLine, SaleLine, StockMovement, User, next_value
+from app.models import KnownBranch, OutboxEvent, Product, ReturnLine, SaleLine, StockMovement, User
 from app.models.requisition import StockRequest, StockRequestLine
+from app.services import numbering_service
 
 ZERO = Decimal("0")
 COVER_WINDOW_DAYS = 30
@@ -145,6 +151,41 @@ async def get(request_id: str) -> StockRequest:
     return found
 
 
+async def company_items(q: str, limit: int = 30) -> list[dict]:
+    """Every Item the company has that matches `q` (name, code or barcode), from head office's list, asked live: the
+    godown's Items with what the godown holds, and Items only other branches carry with what each holds. Each says
+    whether this branch carries it too, and how much it holds."""
+    identity = await _identity()
+    if identity is None:
+        raise RequestError("This branch isn't paired with head office yet, so only Items it already has can be asked for.")
+    if not (q or "").strip():
+        return []
+    from app.services.sync_service import _headers
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{identity.cloud_url}/sync/company-items", params={"q": q.strip(), "limit": min(max(limit, 1), 60)},
+                headers=_headers(identity),
+            )
+    except httpx.HTTPError:
+        raise RequestError("Head office can't be reached right now, so its Item list can't be searched. Items this branch has can still be added.")
+    if response.status_code >= 400:
+        raise RequestError(f"Head office couldn't search its Item list ({response.status_code}). Items this branch has can still be added.")
+    found = [row for row in response.json() if row.get("sku")]
+    here = {p.sku: p for p in await Product.filter(sku__in=[row["sku"] for row in found])}
+    held = await _on_hand([str(p.id) for p in here.values()]) if here else {}
+    out = []
+    for row in found:
+        mine = here.get(row["sku"])
+        out.append({
+            **row, "productId": str(mine.id) if mine else None,
+            "onHandHere": held.get(str(mine.id), ZERO) if mine else None,
+            "branches": [b for b in row.get("branches") or [] if b.get("branchCode") != identity.code],
+        })
+    return out
+
+
 async def sources() -> list[KnownBranch]:
     return await KnownBranch.all().order_by("name")
 
@@ -170,28 +211,46 @@ async def _check_source(source_code: str | None) -> tuple[str | None, str | None
     return branch.code, branch.name
 
 
-async def _check_lines(lines: list[tuple[str, Decimal]]) -> dict[str, Product]:
-    products: dict[str, Product] = {}
-    for product_id, qty in lines:
-        if product_id in products:
+async def _check_lines(lines: list[dict]) -> list[dict]:
+    """Each line as it will be saved: the Item this branch carries, or for one it doesn't yet, the code, name and unit
+    head office's list gave. An Item this branch has becomes its own line even when it was picked by code."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for line in lines:
+        qty = line.get("qty")
+        product = None
+        if line.get("productId"):
+            product = await Product.get_or_none(id=line["productId"])
+            if not product:
+                raise RequestError(f"Unknown Item {line['productId']}")
+        sku = str(line.get("sku") or "").strip()
+        if product is None:
+            if not sku:
+                raise RequestError("A line has no Item. Pick it again from the list.")
+            product = await Product.get_or_none(sku=sku)
+        name = product.name if product else str(line.get("name") or "").strip()
+        if product is None and not name:
+            raise RequestError(f"Item {sku} has no name. Pick it again from head office's list.")
+        code = product.sku if product else sku
+        if code in seen:
             raise RequestError("An Item is on the request twice. Put the whole quantity on one line.")
-        product = await Product.get_or_none(id=product_id)
-        if not product:
-            raise RequestError(f"Unknown Item {product_id}")
+        seen.add(code)
         if qty is None or qty <= ZERO:
-            raise RequestError(f"{product.name}: enter a quantity above zero.")
-        products[product_id] = product
-    return products
+            raise RequestError(f"{name}: enter a quantity above zero.")
+        unit = product.unit if product else (str(line.get("unit") or "").strip()[:30] or None)
+        out.append({"product": product, "sku": code, "name": name[:200], "unit": unit, "qty": qty})
+    return out
 
 
 @atomic()
 async def save_draft(
     user: User, request_id: str | None, source_code: str | None, reason: str | None, needed_by: date | None,
-    lines: list[tuple[str, Decimal]],
+    lines: list[dict],
 ) -> StockRequest:
-    """Write or change a draft. Nothing reaches head office until it is sent."""
+    """Write or change a draft. Nothing reaches head office until it is sent. Each line is {productId} for an Item
+    this branch carries, or {sku, name, unit} for one from head office's list, with its qty."""
     code, name = await _check_source(source_code)
-    products = await _check_lines(lines)
+    checked = await _check_lines(lines)
     if request_id:
         request = await StockRequest.get_or_none(id=request_id)
         if not request:
@@ -200,17 +259,18 @@ async def save_draft(
             raise RequestError(f"{request.number} has been sent, so it can't be changed. Withdraw it and write a new one.")
     else:
         identity = await _identity()
-        seq = await next_value("stock_request", 1)
-        prefix = f"{identity.code}-RQ" if identity else "RQ"
-        request = StockRequest(number=f"{prefix}-{seq:04d}", status="draft", created_by=user, created_by_name=user.name)
+        prefix = f"{identity.code}-RQ-" if identity else "RQ-"
+        number = await numbering_service.next_number("stock_request", StockRequest, "number", prefix, 4)
+        request = StockRequest(number=number, status="draft", created_by=user, created_by_name=user.name)
     request.source_code, request.source_name = code, name
     request.reason = (reason or "").strip()[:255] or None
     request.needed_by = needed_by
     await request.save()
     await StockRequestLine.filter(request=request).delete()
-    for product_id, qty in lines:
-        product = products[product_id]
-        await StockRequestLine.create(request=request, product=product, sku=product.sku, qty_requested=qty)
+    for line in checked:
+        await StockRequestLine.create(
+            request=request, product=line["product"], sku=line["sku"], name=line["name"], unit=line["unit"], qty_requested=line["qty"],
+        )
     return await get(str(request.id))
 
 
@@ -241,17 +301,22 @@ async def send(user: User, request_id: str) -> StockRequest:
     if request.needed_by and request.needed_by < today_pk():
         raise RequestError("The needed-by date has passed. Pick today or a later day.")
     await _check_source(request.source_code)
-    cover = await cover_for([str(line.product_id) for line in request.lines])
+    cover = await cover_for([str(line.product_id) for line in request.lines if line.product_id])
     now = _now()
     wire = []
     for line in request.lines:
-        c = cover.get(str(line.product_id), {})
+        p = line.product
+        # An Item this branch doesn't carry yet: it holds none and has sold none.
+        c = cover.get(str(line.product_id), {}) if p else {"onHand": ZERO, "dailySales": ZERO}
         line.on_hand, line.daily_sales = c.get("onHand"), c.get("dailySales")
         await line.save(update_fields=["on_hand", "daily_sales"])
-        p = line.product
+        if p:
+            described = {"name": p.name, "unit": p.unit, "price": str(p.price), "taxRate": str(p.tax_rate), "isWeighed": p.is_weighed}
+        else:
+            # Head office knows this Item by its code; the name and unit only matter if it has to add it.
+            described = {"name": line.name, "unit": line.unit}
         wire.append({
-            "sku": line.sku or p.sku, "name": p.name, "unit": p.unit, "price": str(p.price), "taxRate": str(p.tax_rate),
-            "isWeighed": p.is_weighed, "qty": str(line.qty_requested),
+            "sku": line.sku or p.sku, **described, "qty": str(line.qty_requested),
             "onHand": None if line.on_hand is None else str(line.on_hand),
             "dailySales": None if line.daily_sales is None else str(line.daily_sales),
         })

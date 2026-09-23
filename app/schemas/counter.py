@@ -13,6 +13,8 @@ class CounterCreateRequest(BaseModel):
 
 
 class CounterUpdateRequest(BaseModel):
+    # The short code can be corrected only until the first till is opened at the counter.
+    code: str | None = None
     name: str | None = None
     location: str | None = None
     active: bool | None = None
@@ -26,6 +28,8 @@ class AssignRequest(BaseModel):
 class CounterOut(BaseModel):
     id: str
     code: str
+    # A till has been opened here at some time, so the code is fixed (bills and tills carry it from then on).
+    codeLocked: bool = False
     name: str
     location: str | None = None
     active: bool
@@ -37,6 +41,8 @@ class CounterOut(BaseModel):
     assignedBy: str | None = None
     # The drawer at this counter.
     tillOpen: bool = False
+    # The open till's id, so the board can take a Branch Manager straight to closing it.
+    sessionId: str | None = None
     sessionNumber: str | None = None
     sessionOpenedAt: datetime | None = None
     openedBy: str | None = None
@@ -51,6 +57,7 @@ class CounterOut(BaseModel):
 
 class LooseTillOut(BaseModel):
     """A drawer open without a counter — opened before the branch had counters, or on one since retired."""
+    sessionId: str | None = None
     sessionNumber: str
     openedBy: str
     openedAt: datetime

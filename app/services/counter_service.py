@@ -69,8 +69,21 @@ async def create_counter(user: User, code: str, name: str, location: str | None)
 
 
 @atomic()
-async def update_counter(user: User, counter_id: str, name: str | None, location: str | None, active: bool | None) -> SalesCounter:
+async def update_counter(
+    user: User, counter_id: str, name: str | None, location: str | None, active: bool | None, code: str | None = None,
+) -> SalesCounter:
     counter = await get_counter(counter_id)
+    if code is not None:
+        cleaned = code.strip().upper()[:20]
+        if not cleaned:
+            raise CounterError("A counter needs a short code.")
+        if cleaned != counter.code:
+            # Correctable until the first till: from then on tills, bills and FBR numbers carry the code.
+            if await TillSession.exists(counter=counter):
+                raise CounterError(f"{counter.code} can't be renamed: a till has been opened at this counter, so its code is fixed.")
+            if await SalesCounter.filter(code=cleaned).exclude(id=counter.id).exists():
+                raise CounterError(f"Counter {cleaned} already exists.")
+            counter.code = cleaned
     if name is not None:
         cleaned = name.strip()[:80]
         if not cleaned:
@@ -175,6 +188,8 @@ async def board() -> dict:
         sessions_by_counter.setdefault(str(s.counter_id), set()).add(str(s.id))
     today_sales = await SaleRecord.filter(at__gte=start, at__lt=end).prefetch_related("cashier")
     today_returns = await ReturnRecord.filter(at__gte=start, at__lt=end)
+    # Counters that have ever had a till opened: their codes are fixed.
+    ever_used = {str(cid) for cid in await TillSession.filter(counter_id__isnull=False).distinct().values_list("counter_id", flat=True)}
 
     rows = []
     for counter in counters:
@@ -190,13 +205,14 @@ async def board() -> dict:
         if session:
             drawer = (await till_service.compute_breakdown(session))["netCash"]
         rows.append({
-            "id": cid, "code": counter.code, "name": counter.name, "location": counter.location,
+            "id": cid, "code": counter.code, "codeLocked": cid in ever_used, "name": counter.name, "location": counter.location,
             "active": counter.active, "deviceId": counter.device_id,
             "person": duty.user.name if duty else None,
             "personId": str(duty.user_id) if duty else None,
             "onDutySince": duty.started_at if duty else None,
             "assignedBy": duty.assigned_by.name if duty and duty.assigned_by else None,
             "tillOpen": session is not None,
+            "sessionId": str(session.id) if session else None,
             "sessionNumber": session.session_number if session else None,
             "sessionOpenedAt": session.opened_at if session else None,
             "openedBy": session.opened_by.name if session else None,
@@ -213,7 +229,7 @@ async def board() -> dict:
         "unattendedTills": len(unassigned),
         # A till session opened before this branch had counters, or on a counter later retired.
         "looseTills": [
-            {"sessionNumber": s.session_number, "openedBy": s.opened_by.name, "openedAt": s.opened_at}
+            {"sessionId": str(s.id), "sessionNumber": s.session_number, "openedBy": s.opened_by.name, "openedAt": s.opened_at}
             for s in sessions if not s.counter_id and s.status == "open"
         ],
     }

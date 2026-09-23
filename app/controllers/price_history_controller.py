@@ -15,9 +15,11 @@ async def for_item(product_id: str) -> list[PriceHistoryEntryOut]:
 
 async def report(
     from_at: datetime | None, to_at: datetime | None, department: str | None, user_id: str | None, source: str | None,
-    field: str | None, q: str | None, limit: int, offset: int,
+    field: str | None, q: str | None, limit: int, offset: int, sort: str | None = None, order: str | None = None,
 ) -> PriceChangesReportOut:
-    found = await price_history_service.search(from_at, to_at, department, user_id, source, field, q, limit, offset)
+    found = await price_history_service.search(
+        from_at, to_at, department, user_id, source, field, q, limit, offset, sort=sort, order=order,
+    )
     return PriceChangesReportOut(rows=[PriceHistoryEntryOut(**e) for e in found["rows"]], total=found["total"])
 
 

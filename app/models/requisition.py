@@ -52,11 +52,15 @@ class StockRequestLine(models.Model):
     request: fields.ForeignKeyRelation[StockRequest] = fields.ForeignKeyField(
         "models.StockRequest", related_name="lines", on_delete=fields.CASCADE
     )
-    product: fields.ForeignKeyRelation["Product"] = fields.ForeignKeyField(
-        "models.Product", related_name="request_lines"
+    # Empty for an Item this branch doesn't carry yet, asked for from head office's list: the line then goes by its
+    # code, name and unit, and the Item joins this branch's list only when stock of it comes.
+    product: fields.ForeignKeyNullableRelation["Product"] = fields.ForeignKeyField(
+        "models.Product", related_name="request_lines", null=True
     )
     # The Item code the line travels by; each server keeps its own Item ids.
     sku = fields.CharField(max_length=60)
+    name = fields.CharField(max_length=200, null=True)
+    unit = fields.CharField(max_length=30, null=True)
     qty_requested = fields.DecimalField(max_digits=12, decimal_places=3)
     # What head office approved. Null until it decides; 0 means it left this Item out.
     qty_approved = fields.DecimalField(max_digits=12, decimal_places=3, null=True)

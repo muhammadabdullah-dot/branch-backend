@@ -45,7 +45,7 @@ async def list_returns(
     from_: datetime | None = Query(None, alias="from"), to: datetime | None = None, limit: int = 200,
     user: User = Depends(_list_read),
 ) -> list[ReturnListItemOut]:
-    return await returns_controller.list_returns(from_, to, limit)
+    return await returns_controller.list_returns(from_, to, limit, user)
 
 
 @router.get("/returns/windows", response_model=ReturnWindowsOut)

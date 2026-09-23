@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import calendar
 import math
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -646,8 +647,52 @@ def _search(rows: list[dict], text: str | None) -> list[dict]:
     return [r for r in rows if t in (r["name"] or "").lower() or t in (r["sku"] or "").lower()]
 
 
+def _text(value) -> list | None:
+    """Words in natural order, as the tables sort them in the browser: numbers inside a code or a name by their value
+    (11050002 before 11050010, Item 9 before Item 10), letters ignoring case. Blank is None."""
+    text = str(value or "").strip().casefold()
+    if not text:
+        return None
+    return [(0, int(part), "") if part.isdigit() else (1, 0, part) for part in re.split(r"(\d+)", text) if part]
+
+
+_XYZ_ORDER = {"X": 0, "Y": 1, "Z": 2, "new": 3, None: 4}
+
+# A column heading on the ABC and XYZ tables -> what that column's rows sort by. None is a blank cell.
+ANALYSIS_SORTS = {
+    "rank": lambda r: r["rank"],
+    "name": lambda r: _text(r["name"]),
+    "code": lambda r: _text(r["sku"]),
+    "department": lambda r: _text(r["department"]),
+    "units": lambda r: r["_units"],
+    "sales": lambda r: r["_sales"],
+    "profit": lambda r: r["_profit"],
+    "share": lambda r: r["sharePct"],
+    "before": lambda r: r["shareBeforePct"],
+    "abc": lambda r: r["abcClass"],
+    # Steadiest first: the class, then how much its sales vary within it.
+    "xyz": lambda r: (_XYZ_ORDER[r["xyzClass"]], r["cv"] if r["cv"] is not None else 0),
+    "cv": lambda r: r["cv"],
+    "perBucket": lambda r: r["perBucket"],
+    "bucketsSold": lambda r: r["bucketsSold"],
+    # No date is the start of the period, the earliest there is.
+    "since": lambda r: r["since"] or "",
+}
+
+
+def _sorted(rows: list[dict], sort: str | None, order: str | None) -> list[dict]:
+    """The whole list in a column's order, before it is cut into pages. Blank cells go last whichever way; rows that
+    tie keep the view's own order. A column this doesn't know leaves the view's own order as it is."""
+    key = ANALYSIS_SORTS.get(sort or "")
+    if key is None:
+        return rows
+    keyed = [(key(r), r) for r in rows]
+    filled = sorted((k for k in keyed if k[0] is not None), key=lambda k: k[0], reverse=order == "desc")
+    return [r for _, r in filled] + [r for k, r in keyed if k is None]
+
+
 async def abc(period: Period, basis: str, scope: Scope, klass: str | None, xyz: str | None, cell: str | None,
-              search: str | None, limit: int, offset: int) -> dict:
+              search: str | None, limit: int, offset: int, sort: str | None = None, order: str | None = None) -> dict:
     result = await classify(period, basis, scope)
     rows = result["items"]
     if klass:
@@ -656,7 +701,7 @@ async def abc(period: Period, basis: str, scope: Scope, klass: str | None, xyz: 
         rows = [r for r in rows if (r["xyzClass"] or "none") == (xyz if xyz == "new" else xyz.upper())]
     if cell:
         rows = [r for r in rows if r["cell"] == cell.upper() or (cell.lower().endswith("new") and r["abcClass"] == cell[0].upper() and r["xyzClass"] == "new")]
-    rows = _search(rows, search)
+    rows = _sorted(_search(rows, search), sort, order)
     return {
         **_summary(result, period, basis), "count": len(rows),
         "items": [_row_out(r, basis) for r in _page(rows, limit, offset)],
@@ -664,13 +709,13 @@ async def abc(period: Period, basis: str, scope: Scope, klass: str | None, xyz: 
     }
 
 
-async def xyz(period: Period, basis: str, scope: Scope, klass: str | None, search: str | None, limit: int, offset: int) -> dict:
+async def xyz(period: Period, basis: str, scope: Scope, klass: str | None, search: str | None, limit: int, offset: int,
+              sort: str | None = None, order: str | None = None) -> dict:
     result = await classify(period, basis, scope)
-    order = {"X": 0, "Y": 1, "Z": 2, "new": 3, None: 4}
-    rows = sorted(result["items"], key=lambda r: (order[r["xyzClass"]], r["cv"] if r["cv"] is not None else 0, -r["_sales"]))
+    rows = sorted(result["items"], key=lambda r: (_XYZ_ORDER[r["xyzClass"]], r["cv"] if r["cv"] is not None else 0, -r["_sales"]))
     if klass:
         rows = [r for r in rows if (r["xyzClass"] or "none") == (klass if klass in ("new", "none") else klass.upper())]
-    rows = _search(rows, search)
+    rows = _sorted(_search(rows, search), sort, order)
     return {
         **_summary(result, period, basis), "count": len(rows),
         "items": [_row_out(r, basis) for r in _page(rows, limit, offset)],
@@ -699,18 +744,58 @@ async def matrix(period: Period, basis: str, scope: Scope) -> dict:
 
 # ── sold least ──────────────────────────────────────────────────────────────────────────────────
 
+# The picker's three orders, used when no direction is given.
 SOLD_LEAST_SORTS = {
     "units": "units ASC, stock_value DESC, sales ASC, p.name",
     "stockValue": "stock_value DESC, units ASC, p.name",
     "cover": "CASE WHEN units > 0 THEN on_hand / units ELSE 1e18 END DESC, stock_value DESC, p.name",
 }
 
+# A column heading, with a direction: what that column's rows sort by, worked out per Item in `listed` below (p is
+# the Item, sold its sales in the period, oh its stock). NULL is a blank cell. Supplier and Last sold are only worked
+# out for the whole list when they are what it is sorted by; otherwise just for the page on screen.
+SOLD_LEAST_COLUMNS = {
+    "name": "p.name",
+    # Codes in number order, as on the ABC and XYZ tabs: an all-digit code is padded, so 200 comes before 11050010.
+    "code": (
+        "CASE WHEN TRIM(p.sku) = '' THEN NULL WHEN p.sku NOT GLOB '*[^0-9]*' "
+        "THEN printf('%020d', CAST(p.sku AS INTEGER)) ELSE p.sku END"
+    ),
+    "department": "NULLIF(TRIM(p.department), '')",
+    "supplier": (
+        "COALESCE((SELECT su.name FROM product_suppliers ps JOIN suppliers su ON su.id = ps.supplier_id "
+        "WHERE ps.product_id = p.id ORDER BY ps.priority LIMIT 1), "
+        "(SELECT su.name FROM grn_lines gl JOIN grns g ON g.id = gl.grn_id JOIN suppliers su ON su.id = g.supplier_id "
+        "WHERE gl.product_id = p.id ORDER BY g.at DESC LIMIT 1))"
+    ),
+    "units": "COALESCE(sold.units, 0)",
+    "sales": "COALESCE(sold.sales, 0)",
+    "lastSold": (
+        "(SELECT MAX(sr.at) FROM sale_lines sl JOIN sale_records sr ON sr.id = sl.sale_id "
+        "WHERE sl.product_id = p.id AND sl.is_return = 0 AND sr.at < ?)"
+    ),
+    "onHand": "COALESCE(oh.on_hand, 0)",
+    "stockValue": "MAX(COALESCE(oh.on_hand, 0), 0) * COALESCE(CAST(p.avg_cost AS REAL), 0)",
+    # As the column shows it: nothing on hand is blank, stock with no sales lasts for ever.
+    "cover": "CASE WHEN COALESCE(oh.on_hand, 0) <= 0 THEN NULL WHEN COALESCE(sold.units, 0) > 0 THEN oh.on_hand / sold.units ELSE 1e18 END",
+}
 
-async def sold_least(period: Period, scope: Scope, search: str | None, sort: str, limit: int, offset: int, unsold_only: bool = False) -> dict:
+
+async def sold_least(period: Period, scope: Scope, search: str | None, sort: str, limit: int, offset: int, unsold_only: bool = False,
+                     order: str | None = None) -> dict:
     """Every Item that is on the shelf or sold in the period, least sold first. An Item with stock that didn't sell
-    at all is the first thing this list is for, so those come before anything that sold even once."""
-    if sort not in SOLD_LEAST_SORTS:
-        sort = "units"
+    at all is the first thing this list is for, so those come before anything that sold even once.
+
+    `sort` with no `order` is one of the picker's orders; with `order` (asc or desc) it is a column heading, sorting
+    the whole list that way with blank cells last and then by name."""
+    if order in ("asc", "desc") and sort in SOLD_LEAST_COLUMNS:
+        sort_key, sort_params = SOLD_LEAST_COLUMNS[sort], ([period.end_at] if sort == "lastSold" else [])
+        ordering = f"p.sort_key IS NULL, p.sort_key COLLATE NOCASE {order.upper()}, p.name COLLATE NOCASE, p.id"
+    else:
+        order = None
+        if sort not in SOLD_LEAST_SORTS:
+            sort = "units"
+        sort_key, sort_params, ordering = "NULL", [], SOLD_LEAST_SORTS[sort]
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
     sql, params = lines_sql(period)
@@ -744,7 +829,8 @@ async def sold_least(period: Period, scope: Scope, search: str | None, sort: str
                    p.brand AS brand, CAST(p.avg_cost AS REAL) AS avg_cost,
                    COALESCE(sold.units, 0) AS units, COALESCE(sold.sales, 0) AS sales, COALESCE(sold.bills, 0) AS bills,
                    COALESCE(oh.on_hand, 0) AS on_hand,
-                   MAX(COALESCE(oh.on_hand, 0), 0) * COALESCE(CAST(p.avg_cost AS REAL), 0) AS stock_value
+                   MAX(COALESCE(oh.on_hand, 0), 0) * COALESCE(CAST(p.avg_cost AS REAL), 0) AS stock_value,
+                   {sort_key} AS sort_key
             FROM products p
             LEFT JOIN oh ON oh.product_id = p.id
             LEFT JOIN sold ON sold.product_id = p.id
@@ -755,9 +841,9 @@ async def sold_least(period: Period, scope: Scope, search: str | None, sort: str
                SUM(CASE WHEN units <= 0 THEN 1 ELSE 0 END) OVER () AS unsold_rows,
                SUM(CASE WHEN units <= 0 THEN stock_value ELSE 0 END) OVER () AS unsold_value
         FROM listed p
-        ORDER BY {SOLD_LEAST_SORTS[sort]}
+        ORDER BY {ordering}
         LIMIT ? OFFSET ?
-    """, params + where_params + [limit, offset])
+    """, params + sort_params + where_params + [limit, offset])
 
     ids = [str(r["id"]) for r in rows]
     last = await last_sold(ids, period.end_at)
@@ -765,7 +851,7 @@ async def sold_least(period: Period, scope: Scope, search: str | None, sort: str
     total = rows[0]["total_rows"] if rows else 0
     if not rows and offset:
         # Asked for a page past the end: still say how many there are.
-        total = (await sold_least(period, scope, search, sort, 1, 0, unsold_only))["count"]
+        total = (await sold_least(period, scope, search, "units", 1, 0, unsold_only))["count"]
 
     out = []
     for r in rows:
@@ -780,7 +866,7 @@ async def sold_least(period: Period, scope: Scope, search: str | None, sort: str
             "daysOfCover": round(cover) if cover is not None else None,
         })
     return {
-        "period": period.out(), "count": total, "items": out, "sort": sort,
+        "period": period.out(), "count": total, "items": out, "sort": sort, "order": order,
         "unsold": int(rows[0]["unsold_rows"] or 0) if rows else 0,
         "unsoldValue": money(rows[0]["unsold_value"]) if rows else "0.00",
         "notes": [

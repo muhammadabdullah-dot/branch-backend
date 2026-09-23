@@ -8,6 +8,7 @@ from decimal import Decimal
 from tortoise import Tortoise
 from tortoise.transactions import atomic
 
+from app.core.ordering import by_column
 from app.core.device_context import get_device_id
 from app.models import (
     GRN,
@@ -24,9 +25,8 @@ from app.models import (
     Supplier,
     User,
     balance_for,
-    next_value,
 )
-from app.services import price_history_service
+from app.services import numbering_service, price_history_service
 from app.schemas.inventory import (
     AdjustmentSubmitRequest,
     CountSubmitRequest,
@@ -132,7 +132,9 @@ MOVEMENT_SORTS = {
     "qty": "qty",
     "kind": "kind",
     "item": "product__name",
-    "location": "location_id",
+    "code": "product__sku",
+    # By the name the column shows, not the location's id.
+    "location": "location__name",
     "by": "origin_user__name",
 }
 
@@ -157,7 +159,8 @@ async def list_movements(
     direction = "" if order == "asc" else "-"
     # `at` as a tiebreaker: rows with the same quantity or kind still come back in a stable order,
     # so paging forward never shows a row twice or skips one.
-    ordering = [f"{direction}{field}"] + ([] if field == "at" else ["-at"])
+    qs, keys = by_column(qs, field, direction, {"product__sku": "code", "product__name": "text"}.get(field))
+    ordering = keys + ([] if field == "at" else ["-at"])
     movements = await qs.order_by(*ordering).offset(offset).limit(limit)
     return movements, total
 
@@ -185,9 +188,8 @@ async def receive_grn(user: User, payload: GRNCreateRequest) -> GRN:
                 raise InventoryError(f"{product.name}: the new {label} price can't be negative.")
         products[line.productId] = product
 
-    seq = await next_value("grn", 11)
     grn = await GRN.create(
-        grn_number=f"GRN-{seq:04d}",
+        grn_number=await numbering_service.next_number("grn", GRN, "grn_number", "GRN-", 4),
         supplier=supplier,
         party_inv_no=payload.partyInvNo,
         location=location,
@@ -342,9 +344,8 @@ async def create_purchase_return(user: User, payload: PurchaseReturnCreateReques
             raise InventoryError(f"Unknown product {line.productId}")
         products[line.productId] = product
 
-    seq = await next_value("purchase_return", 1)
     ret = await PurchaseReturn.create(
-        return_number=f"PR-{seq:04d}", supplier=supplier, location=location, grn=grn,
+        return_number=await numbering_service.next_number("purchase_return", PurchaseReturn, "return_number", "PR-", 4), supplier=supplier, location=location, grn=grn,
         reason=payload.reason, notes=payload.notes or None, submitted_by=user,
     )
 

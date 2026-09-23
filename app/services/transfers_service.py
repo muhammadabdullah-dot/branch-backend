@@ -17,14 +17,18 @@ Every shipment goes step by step, and nothing moves until the step before it is 
 
 A branch that stays offline for a long time can be sent to without its acknowledgement: head office's
 Warehouse Manager does that with a written reason, and this branch is told.
+
+Every line carries its Item described in full (see "the Item on a transfer line" below), so an Item arrives here
+with its department, pack, pieces and barcodes, and nobody has to fill them in before it is sold.
 """
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from tortoise.transactions import atomic
 
 from app.core.device_context import get_device_id
-from app.models import KnownBranch, Location, OutboxEvent, Product, ProductAlias, StockMovement, Transfer, TransferLine, User, balance_for, next_value
+from app.core.pk_time import pk_day
+from app.models import KnownBranch, Location, OutboxEvent, Product, ProductAlias, StockMovement, Transfer, TransferLine, User, balance_for
 
 ZERO = Decimal("0")
 OPEN_INBOUND = ("approved", "dispatched", "in_transit")
@@ -123,13 +127,17 @@ async def open_dispute(user: User, transfer_id: str, note: str) -> Transfer:
     transfer = await Transfer.get_or_none(id=transfer_id)
     if not transfer:
         raise TransferError("Transfer not found")
-    if not (note or "").strip():
+    words = " ".join((note or "").split())
+    if not words:
         raise TransferError("Say what's wrong with it.")
+    now = datetime.now(timezone.utc)
+    previous = (transfer.dispute_note or "").strip()
     transfer.dispute_open = True
-    transfer.dispute_note = note.strip()
+    # Opened again after an earlier dispute: the earlier report and how it was settled stay on record.
+    transfer.dispute_note = f"{previous} · Reopened by {user.name} on {pk_day(now):%d %b %Y}: {words}" if previous else words
     await transfer.save()
     if transfer.origin != "local":
-        await _event(user, transfer, {"event": "dispute_opened", "transferId": str(transfer.id), "note": transfer.dispute_note, "by": user.name})
+        await _event(user, transfer, {"event": "dispute_opened", "transferId": str(transfer.id), "note": words, "by": user.name, "at": now.isoformat()})
     await transfer.fetch_related("lines")
     return transfer
 
@@ -310,11 +318,13 @@ async def dispatch_outbound(
         if sorted((str(l.product_id), l.qty_sent) for l in earlier.lines) == wanted:
             return earlier
 
+    from app.services import numbering_service
+
     now = _now()
-    seq = await next_value("transfer_out", 1)
+    number = await numbering_service.next_number("transfer_out", Transfer, "number", f"{identity.code}-TR-", 4, direction="outbound")
     can_approve = await has_permission(user, "inventory.transfers.approve", "X")
     transfer = await Transfer.create(
-        number=f"{identity.code}-TR-{seq:04d}", direction="outbound", origin="branch",
+        number=number, direction="outbound", origin="branch",
         from_warehouse=destination.name, counterparty_code=destination.code, status="awaiting_approval",
         vehicle=(vehicle or "").strip() or None, driver=(driver or "").strip() or None, notes=(notes or "").strip() or None,
         location=location, requested_by=user, requested_at=now,
@@ -342,11 +352,7 @@ async def _ask_destination(user: User, transfer: Transfer, approved_by: User | N
         "vehicle": transfer.vehicle, "driver": transfer.driver, "notes": transfer.notes, "requestedAt": now.isoformat(),
         "requestedBy": (await User.get_or_none(id=transfer.requested_by_id)).name if transfer.requested_by_id else user.name,
         "approvedBy": approved_by.name if approved_by else None,
-        "lines": [{
-            "sku": line.product.sku, "name": line.product.name, "unit": line.product.unit, "price": str(line.product.price),
-            "taxRate": str(line.product.tax_rate), "isWeighed": line.product.is_weighed, "qtySent": str(line.qty_sent),
-            "unitCost": str(line.unit_cost if line.unit_cost is not None else line.product.avg_cost or 0),
-        } for line in transfer.lines],
+        "lines": await _lines_out(transfer),
     }})
 
 
@@ -407,11 +413,7 @@ async def dispatch_ready(
         "id": str(transfer.id), "number": transfer.number, "destinationCode": transfer.counterparty_code,
         "vehicle": transfer.vehicle, "driver": transfer.driver, "notes": transfer.notes, "dispatchedAt": now.isoformat(),
         "dispatchedBy": user.name,
-        "lines": [{
-            "sku": line.product.sku, "name": line.product.name, "unit": line.product.unit, "price": str(line.product.price),
-            "taxRate": str(line.product.tax_rate), "isWeighed": line.product.is_weighed, "qtySent": str(line.qty_sent),
-            "unitCost": str(line.unit_cost if line.unit_cost is not None else line.product.avg_cost or 0),
-        } for line in transfer.lines],
+        "lines": await _lines_out(transfer),
     }})
     await transfer.fetch_related("lines")
     return transfer
@@ -440,11 +442,231 @@ async def cancel_outbound(user: User, transfer_id: str, reason: str | None) -> T
     return transfer
 
 
+# ── the Item on a transfer line ─────────────────────────────────────────────────────────────────
+#
+# Every line carries the whole Item as its sender keeps it: head office sends its godown Item, and a branch sending to
+# another branch sends its own, which head office passes on as it came. An Item new here is made with all of it,
+# prices included. An Item this branch already has only gets what it has left blank: its prices, and anything
+# already set here, stay as they are. The pack, the pieces and the reorder level count in the Item's unit, so they are
+# filled in only on an Item stocked in the same unit as the sender's.
+#
+# A shipment head office asks another branch to send reaches this branch before the sending branch has described its
+# Items, so its lines say `provisional` and carry head office's copy. An Item new here from such a line is marked
+# "details to complete"; when the sending branch's own description arrives (with the dispatch), the Item takes all of
+# it, as long as nobody has saved it or stocked it since.
+
+# Line key, this branch's column, the longest value the column holds.
+_TEXT = (
+    ("department", "department", 80), ("category", "category", 80), ("itemClass", "item_class", 80), ("subclass", "subclass", 80),
+    ("brand", "brand", 120), ("manufacturer", "manufacturer", 120), ("variant", "variant", 60),
+)
+# The prices besides the sale price, set only on an Item new here.
+_PRICES = (
+    ("rpp", "rpp"), ("wholesalePrice", "wholesale_price"), ("piecePrice", "piece_price"), ("stripPrice", "strip_price"),
+    ("packPrice", "pack_price"), ("boxPrice", "box_price"),
+)
+# Counted in the Item's unit: filled in only where the units match.
+_IN_UNITS = ("pack_unit", "pack_size", "packs_per_box", "pieces_per_unit", "piece_unit", "pieces_per_strip", "reorder_level")
+_MAX_PIECES = 1000
+
+
+def _plain(value) -> str | None:
+    """A number as it travels: plain digits, never 1E+1."""
+    return None if value is None else format(Decimal(str(value)).normalize(), "f")
+
+
+async def describe(product: Product) -> dict:
+    """This branch's Item as a transfer line carries it to another branch."""
+    aliases = await ProductAlias.filter(product_id=product.id)
+    return {
+        "sku": product.sku, "name": product.name, "unit": product.unit, "isWeighed": product.is_weighed,
+        "taxRate": _plain(product.tax_rate), "price": _plain(product.price),
+        **{key: _plain(getattr(product, column)) for key, column in _PRICES},
+        "barcode": product.barcode,
+        "aliases": [
+            {"code": a.code, "qty": _plain(a.qty), "remarks": a.remarks, "discPercent": _plain(a.disc_percent), "discFlat": _plain(a.disc_flat)}
+            for a in aliases
+        ],
+        **{key: getattr(product, column) for key, column, _ in _TEXT},
+        "origin": product.origin, "packUnit": product.pack_unit, "packSize": product.pack_size, "packsPerBox": product.packs_per_box,
+        "piecesPerUnit": product.pieces_per_unit, "pieceUnit": product.piece_unit, "piecesPerStrip": product.pieces_per_strip,
+        "lockDisc": product.lock_disc, "reorderLevel": _plain(product.reorder_level),
+        "needsDetails": product.needs_details, "detailsNote": product.details_note if product.needs_details else None,
+    }
+
+
+async def _lines_out(transfer: Transfer) -> list[dict]:
+    """The lines of a shipment this branch sends, each Item described in full for the branch receiving it."""
+    return [
+        {
+            **await describe(line.product), "qtySent": str(line.qty_sent),
+            "unitCost": str(line.unit_cost if line.unit_cost is not None else line.product.avg_cost or 0),
+        }
+        for line in transfer.lines
+    ]
+
+
+def _text(line: dict, key: str, size: int) -> str | None:
+    return str(line.get(key) or "").strip()[:size] or None
+
+
+def _number(line: dict, key: str) -> Decimal | None:
+    value = line.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return number if number.is_finite() and number >= 0 else None
+
+
+def _count(line: dict, key: str, top: int | None = None) -> int | None:
+    number = _number(line, key)
+    if number is None or number < 1 or number != number.to_integral_value() or (top and number > top):
+        return None
+    return int(number)
+
+
+def _money(line: dict, key: str) -> Decimal | None:
+    number = _number(line, key)
+    return None if number is None else number.quantize(Decimal("0.01"))
+
+
+def _described(line: dict) -> dict:
+    """What a line says about its Item, as this branch's columns. Left out: what the line leaves blank."""
+    origin = str(line.get("origin") or "").strip().lower()
+    out = {
+        **{column: _text(line, key, size) for key, column, size in _TEXT},
+        "origin": origin if origin in ("local", "imported") else None,
+        "pack_unit": _text(line, "packUnit", 40), "pack_size": _count(line, "packSize"), "packs_per_box": _count(line, "packsPerBox"),
+        "pieces_per_unit": _count(line, "piecesPerUnit", _MAX_PIECES), "piece_unit": _text(line, "pieceUnit", 20),
+        "pieces_per_strip": _count(line, "piecesPerStrip", _MAX_PIECES), "reorder_level": _number(line, "reorderLevel"),
+    }
+    return {column: value for column, value in out.items() if value is not None}
+
+
+async def _free_code(code, sku: str, product_id: str | None = None) -> str | None:
+    """A barcode this branch can give the Item: not blank, not its own code, and not ringing up anything else here."""
+    from app.services import catalog_service
+
+    code = str(code or "").strip()
+    if not code or len(code) > 40 or code == sku:
+        return None
+    return None if await catalog_service.code_owner(code, product_id) else code
+
+
+async def _add_aliases(product: Product, line: dict) -> None:
+    """The sender's alternate barcodes (a carton's, a strip's), leaving out any that already ring up something here."""
+    from app.services import catalog_service
+
+    seen = {product.sku, product.barcode}
+    for alias in line.get("aliases") or []:
+        code = str((alias or {}).get("code") or "").strip()
+        qty = _number(alias, "qty")
+        if not code or len(code) > 60 or code in seen or not qty or await catalog_service.code_owner(code):
+            continue
+        seen.add(code)
+        await ProductAlias.create(
+            product=product, code=code, remarks=_text(alias, "remarks", 255), qty=qty,
+            disc_percent=_number(alias, "discPercent") or Decimal("0"), disc_flat=_money(alias, "discFlat") or Decimal("0"),
+        )
+
+
+def _provisional_note(number: str | None) -> str:
+    return f"Came on {number or 'a shipment'} as head office has it. The sending branch's own details replace these when it dispatches."[:200]
+
+
+def _carried_note(line: dict) -> str | None:
+    """An Item the sender itself still has to complete arrives marked the same way here."""
+    if not line.get("needsDetails"):
+        return None
+    return f"Still to complete where it came from: {str(line.get('detailsNote') or 'check its details').strip()}"[:200]
+
+
+async def _describe_new(product: Product | None, sku: str, line: dict, number: str | None) -> Product:
+    """Makes the Item from the line, or, given `product`, makes it over from the line (see _still_provisional)."""
+    from app.services import price_history_service
+
+    note = _provisional_note(number) if line.get("provisional") else _carried_note(line)
+    fields = {
+        "name": (str(line.get("name") or "").strip() or sku)[:160], "unit": (_text(line, "unit", 20) or "pc"),
+        "is_weighed": bool(line.get("isWeighed")), "tax_rate": _number(line, "taxRate") or Decimal("0"),
+        "price": _money(line, "price") or Decimal("0"), "lock_disc": bool(line.get("lockDisc")),
+        **{column: _money(line, key) for key, column in _PRICES},
+        **{column: None for _, column, _ in _TEXT}, **{column: None for column in _IN_UNITS}, "origin": None,
+        **_described(line), "needs_details": note is not None, "details_note": note,
+    }
+    if product is None:
+        product_id = sku if not await Product.exists(id=sku) else f"ho-{sku}"
+        product = await Product.create(
+            id=product_id[:40], sku=sku[:40], avg_cost=_number(line, "unitCost") or Decimal("0"), remarks="Added by a head office transfer",
+            barcode=await _free_code(line.get("barcode"), sku), **fields,
+        )
+        await _add_aliases(product, line)
+        await price_history_service.save_rows([price_history_service.first_price(product, "transfer-new", number)])
+        return product
+    before = price_history_service.snapshot(product)
+    for column, value in fields.items():
+        setattr(product, column, value)
+    product.barcode = await _free_code(line.get("barcode"), product.sku, product.id)
+    await product.save()
+    await ProductAlias.filter(product_id=product.id).delete()
+    await _add_aliases(product, line)
+    await price_history_service.record(product, before, "transfer-new", number)
+    return product
+
+
+async def _still_provisional(product: Product, number: str | None) -> bool:
+    """Made here from head office's copy of this very shipment, and not saved, sold or stocked since."""
+    return (
+        product.needs_details and product.details_note == _provisional_note(number)
+        and not await StockMovement.exists(product_id=product.id)
+    )
+
+
+async def _fill_blanks(product: Product, line: dict) -> None:
+    """An Item this branch already has takes from the line only what it leaves blank. Nothing set here changes."""
+    changed: list[str] = []
+
+    def take(column: str, value) -> None:
+        if value is not None and getattr(product, column) in (None, ""):
+            setattr(product, column, value)
+            changed.append(column)
+
+    described = _described(line)
+    for _, column, _ in _TEXT:
+        take(column, described.get(column))
+    take("origin", described.get("origin"))
+    if (product.unit or "").strip().lower() == str(line.get("unit") or "").strip().lower():
+        # A pack and the pieces go on whole: a pack size only beside the same pack unit, a box only over the same pack,
+        # a piece name and strip only over the same pieces.
+        pack_unit, pack_size = described.get("pack_unit"), described.get("pack_size")
+        if not product.pack_unit and not product.pack_size:
+            take("pack_unit", pack_unit)
+            take("pack_size", pack_size)
+        elif (product.pack_unit or "").strip().lower() == (pack_unit or "").strip().lower():
+            take("pack_size", pack_size)
+        if (product.pack_unit or "").strip().lower() == (pack_unit or "").strip().lower() and product.pack_size == pack_size:
+            take("packs_per_box", described.get("packs_per_box"))
+        take("pieces_per_unit", described.get("pieces_per_unit"))
+        if product.pieces_per_unit == described.get("pieces_per_unit"):
+            take("piece_unit", described.get("piece_unit"))
+            take("pieces_per_strip", described.get("pieces_per_strip"))
+        take("reorder_level", described.get("reorder_level"))
+    if not product.barcode and line.get("barcode"):
+        take("barcode", await _free_code(line.get("barcode"), product.sku, product.id))
+    if changed:
+        await product.save(update_fields=changed)
+    if line.get("aliases") and not await ProductAlias.exists(product_id=product.id):
+        await _add_aliases(product, line)
+
+
 # ── applying what head office sends ─────────────────────────────────────────────────────────────
 
-async def _product_for(line: dict) -> Product:
-    """This branch's Item for a line's code — by code, barcode or alternate barcode — or a new Item made
-    from the line when head office sends something this branch has never stocked."""
+async def _product_for(line: dict, number: str | None = None) -> Product:
+    """This branch's Item for a line's code (by code, barcode or alternate barcode), with whatever it left blank filled
+    in from the line; or a new Item made from the line when this branch has never stocked it. `number` is the shipment's."""
     sku = str(line.get("sku") or "").strip()
     if not sku:
         raise TransferError("A transfer line from head office has no Item code.")
@@ -452,17 +674,11 @@ async def _product_for(line: dict) -> Product:
     if not product:
         alias = await ProductAlias.get_or_none(code=sku).prefetch_related("product")
         product = alias.product if alias else None
-    if product:
-        return product
-    product_id = sku if not await Product.exists(id=sku) else f"ho-{sku}"
-    product = await Product.create(
-        id=product_id[:40], sku=sku[:40], name=(line.get("name") or sku)[:160], price=Decimal(str(line.get("price") or "0")),
-        tax_rate=Decimal(str(line.get("taxRate") or "0")), unit=(line.get("unit") or "pc")[:20],
-        is_weighed=bool(line.get("isWeighed")), avg_cost=Decimal(str(line.get("unitCost") or "0")), remarks="Added by a head office transfer",
-    )
-    from app.services import price_history_service
-
-    await price_history_service.save_rows([price_history_service.first_price(product, "transfer-new")])
+    if not product:
+        return await _describe_new(None, sku, line, number)
+    if not line.get("provisional") and await _still_provisional(product, number):
+        return await _describe_new(product, product.sku, line, number)
+    await _fill_blanks(product, line)
     return product
 
 
@@ -556,7 +772,7 @@ async def apply_inbound(state: dict) -> str:
         transfer = await Transfer.create(id=transfer_id, **fields)
         outcome = "created"
     for line in state.get("lines") or []:
-        product = await _product_for(line)
+        product = await _product_for(line, transfer.number)
         await TransferLine.create(
             transfer=transfer, product=product, sku=line.get("sku"), qty_sent=Decimal(str(line.get("qtySent") or "0")),
             unit_cost=Decimal(str(line["unitCost"])) if line.get("unitCost") not in (None, "") else None,
@@ -595,7 +811,7 @@ async def _outbound_from_head_office(state: dict) -> Transfer | None:
         notes=state.get("notes"), requested_at=_dt(state.get("requestedAt")) or _now(), **_take_answer(None, state),
     )
     for line in state.get("lines") or []:
-        product = await _product_for(line)
+        product = await _product_for(line, transfer.number)
         await TransferLine.create(
             transfer=transfer, product=product, sku=line.get("sku"), qty_sent=Decimal(str(line.get("qtySent") or "0")),
             unit_cost=Decimal(str(line["unitCost"])) if line.get("unitCost") not in (None, "") else None,

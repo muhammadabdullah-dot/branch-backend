@@ -78,6 +78,8 @@ class TillReportOut(BaseModel):
     totalDisc: Money
     gst: Money
     misc: Money
+    # What rounding each bill to the rupee added (or took off).
+    roundOff: Money = 0
     creditSale: Money
     nonCashSale: Money
     cashSaleReturn: Money

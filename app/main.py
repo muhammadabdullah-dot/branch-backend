@@ -126,6 +126,11 @@ async def _seed() -> None:
     unmoneyed = await drop_pharmacist_money_ticks()
     if unmoneyed:
         print(f"  staff: payment, till, returns and discount ticks taken off {unmoneyed} Pharmacist(s); they print slips now", flush=True)
+    from app.services.seed_service import take_counter_oversight_off_salespeople
+
+    own_till = await take_counter_oversight_off_salespeople()
+    if own_till:
+        print(f"  staff: Counter board and Staff on duty taken off {own_till} Salesperson(s); they see their own till only", flush=True)
     from app.services.seed_service import split_the_books_access
 
     split = await split_the_books_access()
@@ -134,8 +139,12 @@ async def _seed() -> None:
     await sync_role_resource_grants()
     await link_named_vouchers()
     from app.services import counter_service
+    from app.services.seed_service import demo_data_wanted
 
-    await counter_service.ensure_default_counter()
+    # DEMO_DATA=off: no ready-made "Counter 1"; the Branch Manager adds the counters on the Counter Board (Till Open
+    # says so plainly until one exists).
+    if await demo_data_wanted():
+        await counter_service.ensure_default_counter()
     from app.services.seed_service import give_managers_the_counter_board
 
     boarded = await give_managers_the_counter_board()

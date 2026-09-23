@@ -6,7 +6,7 @@ from app.controllers.sales_controller import _sale_out
 from app.models import User
 from app.schemas.returns import ExchangeOut, ExchangeRequest, ReturnListItemOut, ReturnReceiptOut, ReturnWindowsIn, ReturnWindowsOut
 from app.schemas.sales import ReturnCreateRequest, ReturnQuoteRequest, ReturnRecordOut
-from app.services import masters_service, return_window_service, returns_service
+from app.services import fbr_service, masters_service, return_window_service, returns_service
 from app.schemas.types import money_str
 
 
@@ -30,6 +30,8 @@ async def create(user: User, payload: ReturnCreateRequest) -> ReturnRecordOut:
         record = await returns_service.create_return(user, payload)
     except returns_service.ReturnError as exc:
         raise _fail(exc)
+    # Committed: one short try to get FBR's number for the return's credit note before its receipt is printed.
+    await fbr_service.send_after_commit(returns=[record])
     return await _record_out(record)
 
 
@@ -65,6 +67,8 @@ async def quote_exchange(user: User, payload: ExchangeRequest) -> dict:
 async def exchange(user: User, payload: ExchangeRequest) -> ExchangeOut:
     try:
         record, sale = await returns_service.create_exchange(user, payload)
+        # Both have committed: the return's credit note and the new bill go to FBR before the receipt is made.
+        await fbr_service.send_after_commit(sales=[sale], returns=[record])
         out = await returns_service.receipt(str(record.id), user)
     except returns_service.ReturnError as exc:
         raise _fail(exc)
@@ -86,8 +90,12 @@ async def reprint(return_id: str, user: User) -> ReturnReceiptOut:
         raise HTTPException(status.HTTP_404_NOT_FOUND, exc.message)
 
 
-async def list_returns(from_at: datetime | None, to_at: datetime | None, limit: int) -> list[ReturnListItemOut]:
-    return [ReturnListItemOut(**row) for row in await returns_service.list_returns(from_at, to_at, limit)]
+async def list_returns(from_at: datetime | None, to_at: datetime | None, limit: int, user: User | None = None) -> list[ReturnListItemOut]:
+    from app.services import sales_service
+
+    # A salesperson's list is the returns they took themselves, as with their bills.
+    own = None if user is None or await sales_service.sees_every_bill(user) else user.id
+    return [ReturnListItemOut(**row) for row in await returns_service.list_returns(from_at, to_at, limit, cashier_id=own)]
 
 
 async def windows() -> ReturnWindowsOut:

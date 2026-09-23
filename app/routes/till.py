@@ -8,10 +8,12 @@ from app.models import User
 from app.schemas.till import (
     CashMovementOut,
     CashMovementRequest,
+    OpenTillOut,
     TillCloseOut,
     TillClosePreviewOut,
     TillCloseRequest,
     TillCurrentOut,
+    TillOpenOptionsOut,
     TillOpenRequest,
     TillSessionListOut,
 )
@@ -30,8 +32,22 @@ _sessions_read = require_any_permission(("store.xz", "R"), ("reports", "R"))
 
 
 @router.get("/current", response_model=TillCurrentOut)
-async def current(user: User = Depends(_current_read)) -> TillCurrentOut:
-    return await till_controller.current(user)
+async def current(sessionId: str | None = None, user: User = Depends(_current_read)) -> TillCurrentOut:
+    """The caller's own open till. `sessionId` names another open one, for someone who oversees the tills (a Branch
+    Manager, or the Counter board); anyone else gets 403 for a till that isn't theirs."""
+    return await till_controller.current(user, sessionId)
+
+
+@router.get("/open-tills", response_model=list[OpenTillOut])
+async def open_tills(user: User = Depends(_write)) -> list[OpenTillOut]:
+    """The open tills the caller can work on: every one for someone who oversees them, else only their own."""
+    return await till_controller.open_tills(user)
+
+
+@router.get("/open-options", response_model=TillOpenOptionsOut)
+async def open_options(user: User = Depends(_write)) -> TillOpenOptionsOut:
+    """Till Open's counters (free or taken, and who is on each) and what each counter's last close counted."""
+    return await till_controller.open_options(user)
 
 
 @router.post("/open", response_model=TillCurrentOut)
@@ -67,7 +83,7 @@ async def list_sessions(
     offset: int = 0,
     user: User = Depends(_sessions_read),
 ) -> TillSessionListOut:
-    return await till_controller.list_sessions(from_, to, limit, offset)
+    return await till_controller.list_sessions(user, from_, to, limit, offset)
 
 
 @router.get("/reports", response_model=list[TillReportSessionOut])
@@ -77,10 +93,10 @@ async def report_sessions(
     user: User = Depends(_sessions_read),
 ) -> list[TillReportSessionOut]:
     """Every till open now and the ones closed in the window, with their ids, to open one session's report."""
-    return await till_controller.report_sessions(from_, to)
+    return await till_controller.report_sessions(user, from_, to)
 
 
 @router.get("/reports/{session_id}", response_model=TillReportOut)
 async def session_report(session_id: str, user: User = Depends(_sessions_read)) -> TillReportOut:
     """One session's report: X while it's open (figures so far), Z once closed (counted, short or over)."""
-    return await till_controller.session_report(session_id)
+    return await till_controller.session_report(user, session_id)

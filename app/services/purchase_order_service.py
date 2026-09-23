@@ -3,8 +3,9 @@ from decimal import Decimal
 
 from tortoise.transactions import atomic
 
-from app.models import Location, Product, PurchaseOrder, PurchaseOrderLine, Supplier, User, next_value
+from app.models import Location, Product, PurchaseOrder, PurchaseOrderLine, Supplier, User
 from app.schemas.purchase_orders import PurchaseOrderCreate, PurchaseOrderLineIn, PurchaseOrderUpdate
+from app.services import numbering_service
 from app.services.inventory_service import in_window
 
 APPROVE_RESOURCE = "inventory.purchase-orders.approve"
@@ -79,9 +80,8 @@ async def _write_lines(po: PurchaseOrder, lines: list[PurchaseOrderLineIn]) -> N
 @atomic()
 async def create(user: User, data: PurchaseOrderCreate) -> PurchaseOrder:
     supplier, location = await _check_header(data.supplierId, data.locationId)
-    seq = await next_value("purchase_order", 1)
     po = await PurchaseOrder.create(
-        po_number=f"PO-{seq:04d}", supplier=supplier, location=location, status="draft",
+        po_number=await numbering_service.next_number("purchase_order", PurchaseOrder, "po_number", "PO-", 4), supplier=supplier, location=location, status="draft",
         expected_at=data.expectedAt, notes=(data.notes or "").strip() or None, created_by=user,
     )
     await _write_lines(po, data.lines)

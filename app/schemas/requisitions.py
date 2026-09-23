@@ -7,7 +7,11 @@ from app.schemas.types import Qty
 
 
 class StockRequestLineIn(BaseModel):
-    productId: str
+    # An Item this branch carries, by its id; or one only head office's list has, by its code, name and unit.
+    productId: str | None = None
+    sku: str | None = Field(default=None, max_length=60)
+    name: str | None = Field(default=None, max_length=200)
+    unit: str | None = Field(default=None, max_length=30)
     qty: Decimal = Field(gt=0)
 
 
@@ -24,7 +28,8 @@ class WithdrawIn(BaseModel):
 
 
 class StockRequestLineOut(BaseModel):
-    productId: str
+    # Empty for an Item this branch doesn't carry yet.
+    productId: str | None = None
     productName: str | None = None
     productSku: str | None = None
     unit: str | None = None
@@ -67,6 +72,28 @@ class CoverOut(BaseModel):
     dailySales: Qty
     # Days the stock lasts at the last 30 days' sales; empty when it hasn't sold.
     daysCover: Qty | None = None
+
+
+class CompanyItemHint(BaseModel):
+    branchCode: str
+    branchName: str
+    qty: Qty
+
+
+class CompanyItemOut(BaseModel):
+    """An Item from head office's list, for a stock request. `productId` is set when this branch carries it too."""
+    sku: str
+    name: str
+    unit: str | None = None
+    brand: str | None = None
+    category: str | None = None
+    department: str | None = None
+    # godown: in head office's Item master · branch: only other branches carry it
+    source: str
+    productId: str | None = None
+    onHandHere: Qty | None = None
+    godownQty: Qty | None = None
+    branches: list[CompanyItemHint] = []
 
 
 class SuggestionOut(BaseModel):

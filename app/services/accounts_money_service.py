@@ -122,9 +122,41 @@ def day_bounds(start: date | None, end: date | None) -> tuple[datetime | None, d
     return lo, hi
 
 
+# The payments history's headings, each to what it sorts by: amounts as numbers (the database keeps them as text), the
+# customer by name and the voucher by the number of the one the payment made.
+PAYMENT_SORTS = {
+    "at": "at", "number": "number", "customer": "party__name", "method": "method", "amount": "sort_amount",
+    "balanceAfter": "sort_balance", "voucher": "sort_voucher", "receivedBy": "received_by__name",
+}
+
+
+def _sorted_payments(qs, sort: str | None, order: str | None):
+    """In the order a heading asks for, newest first within a tie. No heading (or one it doesn't know): newest first."""
+    field = PAYMENT_SORTS.get(sort or "")
+    if not field:
+        return qs.order_by("-at")
+    from tortoise.expressions import RawSQL
+
+    table, vouchers = CustomerPayment._meta.db_table, Voucher._meta.db_table
+    if field == "sort_amount":
+        qs = qs.annotate(sort_amount=RawSQL(f'CAST("{table}"."amount" AS REAL)'))
+    elif field == "sort_balance":
+        qs = qs.annotate(sort_balance=RawSQL(f'CAST("{table}"."balance_after" AS REAL)'))
+    elif field == "sort_voucher":
+        # Found the way payment_detail finds it: by the till movement the payment made, else by the payment itself.
+        qs = qs.annotate(sort_voucher=RawSQL(
+            f'(SELECT v."number" FROM "{vouchers}" v WHERE v."source" = CASE WHEN "{table}"."cash_movement_id" IS NULL '
+            f"""THEN 'customer-payment:' || "{table}"."id" ELSE 'cash-move:' || "{table}"."cash_movement_id" END)"""
+        ))
+    direction = "-" if order == "desc" else ""
+    if field == "at":
+        return qs.order_by(f"{direction}at", "id")
+    return qs.order_by(f"{direction}{field}", "-at", "id")
+
+
 async def list_payments(party_id: str | None, from_at: datetime | None, to_at: datetime | None, limit: int, offset: int,
                         from_day: date | None = None, to_day: date | None = None, q: str | None = None,
-                        voided: bool | None = None) -> tuple[list[dict], int, str]:
+                        voided: bool | None = None, sort: str | None = None, order: str | None = None) -> tuple[list[dict], int, str]:
     qs = CustomerPayment.all()
     if party_id:
         qs = qs.filter(party_id=party_id)
@@ -147,7 +179,7 @@ async def list_payments(party_id: str | None, from_at: datetime | None, to_at: d
     total = await qs.count()
     # What stands: the sum of the payments that aren't voided, for the whole filter, not just the page.
     standing = sum((Decimal(str(a)) for a in await qs.filter(voided_at__isnull=True).values_list("amount", flat=True)), ZERO)
-    rows = await qs.order_by("-at").offset(offset).limit(limit)
+    rows = await _sorted_payments(qs, sort, order).offset(offset).limit(limit)
     return [await payment_detail(p) for p in rows], total, format(money(standing), "f")
 
 

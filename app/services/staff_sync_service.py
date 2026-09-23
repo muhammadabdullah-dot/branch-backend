@@ -6,15 +6,17 @@ raises the account's revision and goes to head office as a `Staff` event carryin
 Down: head office sends `staff.upsert` (the whole account) and `staff.remove` (taken off this branch).
 An incoming account is applied when its revision is at least this branch's; a lower one is ignored,
 because this branch's own newer change is already on its way up. Applying never raises the revision or
-sends an event back — an account arriving from head office is not a change made here.
+sends an event back: an account arriving from head office is not a change made here. The one exception: a new
+starter that an older head office gave every action on every Sales counter screen starts from this branch's own
+starting point instead, and that correction goes back up so head office holds it too.
 """
 import uuid
 
 from tortoise.transactions import atomic
 
 from app.core.abilities import (
-    BRANCH_MANAGER, DROPPED_RESOURCES, LEGACY_JOBS, PHARMACIST, SALESPERSON, is_legacy, legacy_grants, never_for,
-    translate_legacy, translate_legacy_resources,
+    BRANCH_MANAGER, COUNTER_RESOURCES, COUNTER_ROLES, DROPPED_RESOURCES, LEGACY_JOBS, PHARMACIST, SALESPERSON, is_legacy,
+    legacy_grants, never_for, preset_grants, translate_legacy, translate_legacy_resources,
 )
 from app.core.device_context import get_device_id
 from app.core.resources import excluded_resources_for_role
@@ -123,6 +125,13 @@ async def apply_upsert(data: dict) -> str:
     grants = data.get("permissions") or []
     if legacy and not grants:
         grants = [{"resource": r, "actions": sorted(a)} for r, a in legacy_grants(data.get("roleId") or "").items()]
+    corrected = False
+    if outcome == "created" and await _is_blanket_start(role_id, grants):
+        # A head office from before it knew the branch's starting ticks gave a new starter every action on every Sales
+        # counter screen of their role (dry run B4: a Salesperson who could put people on counters). They start from
+        # this branch's own starting point instead, and head office is told, so both ends hold the same.
+        grants = [{"resource": r, "actions": sorted(a)} for r, a in preset_grants(role_id).items()]
+        corrected = True
     if is_legacy(g.get("resource") for g in grants):
         # Written before the books were split into a tick per screen and area: read as what it now stands for.
         held: dict[str, set[str]] = {}
@@ -140,7 +149,23 @@ async def apply_upsert(data: dict) -> str:
             user=user, resource=resource,
             can_read="R" in actions, can_write="W" in actions, can_execute="X" in actions,
         )
+    if corrected:
+        await emit(user.id)
     return outcome
+
+
+async def _is_blanket_start(role_id: str, grants: list[dict]) -> bool:
+    """Head office's old way of starting someone: R, W and X on every Sales counter screen of their role, with nothing
+    else. Only a Salesperson or Pharmacist this branch keeps its own starting point for; a starting point head office
+    manages (Role access) is head office's to give."""
+    if role_id not in COUNTER_ROLES or not grants:
+        return False
+    role = await Role.get_or_none(id=role_id)
+    if role is None or role.managed_by_head_office:
+        return False
+    return all(
+        g.get("resource") in COUNTER_RESOURCES and set(g.get("actions") or []) == {"R", "W", "X"} for g in grants
+    )
 
 
 async def apply_remove(data: dict) -> str:
