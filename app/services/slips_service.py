@@ -54,8 +54,11 @@ def number_of(seq: int) -> str:
 
 
 def normalise_number(code: str | None) -> str | None:
-    """P-0042 however it was typed or scanned (p-42, P0042, P 0042); None when it isn't a slip number."""
-    m = re.fullmatch(r"\s*[Pp]\s*-?\s*(\d{1,8})\s*", code or "")
+    """P-0042 however it was typed or scanned (p0042, P 0042, p-0042); None when it isn't a slip number.
+
+    The digits must be the whole number as it is printed on the slip. A short P-42 is not taken as P-0042: at a busy
+    counter that turns one missed key into the wrong slip being paid, and the cashier would have no way of knowing."""
+    m = re.fullmatch(r"\s*[Pp]\s*-?\s*(\d{4,8})\s*", code or "")
     return number_of(int(m.group(1))) if m else None
 
 
@@ -365,7 +368,10 @@ async def pay(user: User, code: str, data: SlipPayIn) -> tuple[HeldBill, SaleRec
         raise SlipError("Only cash gives change back. Lower the card or online amount to what is due.")
 
     made = {"number": slip.number, "pharmacistId": str(slip.made_by_id) if slip.made_by_id else None, "pharmacistName": maker_name(slip)}
-    request = SaleCreateRequest(lines=_sale_lines(slip), tenders=tenders, tenderDetails=data.tenderDetails, clientRequestId=data.clientRequestId)
+    request = SaleCreateRequest(
+        lines=_sale_lines(slip), tenders=tenders, tenderDetails=data.tenderDetails, member=data.member,
+        clientRequestId=data.clientRequestId,
+    )
     names = [p.name for p in await Product.filter(id__in=list({str(line["productId"]) for line in slip.lines}))]
     try:
         async with in_transaction():

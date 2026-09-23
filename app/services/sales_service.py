@@ -366,7 +366,8 @@ async def _check_return_line(line, product: Product, lines, products: dict[str, 
 async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict | None = None) -> SaleRecord:
     """`slip` is set when this sale is a pharmacy slip's payment (services/slips_service.py pay): {"number",
     "pharmacistId", "pharmacistName"}. Its lines are the slip's own, every one the Pharmacist's to sell, so whoever takes
-    the payment needs no pass for them; and it is a payment only, so no member is signed up and no points are earned."""
+    the payment needs no pass for them. Who paid is taken as on a bill: a card or online payment needs the customer's
+    name and mobile number, which makes them a member and earns the points."""
     # Idempotent replay: checked FIRST, before any other validation or side effect, so a
     # retried request (lost response, double-click) returns the already-committed sale instead
     # of re-running credit-limit checks, re-posting stock movements, or re-redeeming a voucher.
@@ -600,7 +601,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
 
     received = sum(payload.tenders.values(), ZERO)
     if received < net_value:
-        raise SaleError(f"Payment not covered. Still to pay: {money_str(net_value - received)}")
+        raise SaleError(f"Payment not covered. Still to pay: {sale_rules.rs(net_value - received)}")
     cash_back = max(ZERO, received - net_value)
     # Change only ever comes out of the cash handed over: a card, wallet, bank, voucher, points or credit payment is for
     # what is due, never more (dry run B12: a card-only bill gave Rs 0.40 back).
@@ -609,8 +610,9 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
 
     # Members and points. Earned on what the customer actually paid: never on what points paid for.
     details = await _tender_details(payload)
-    # A slip's payment is an amount collected, nothing more: card and online payments on it don't sign anyone up.
-    member = None if slip is not None else await _resolve_member(payload, party, cashier)
+    # Who paid, on a bill and on a slip's payment alike: a card or online payment needs the customer's name and mobile
+    # number, which makes them a member and earns the points. The details are what a payment that fails is traced by.
+    member = await _resolve_member(payload, party, cashier)
     loyalty = await members_service.settings()
     points_amount = payload.tenders.get("POINTS", ZERO)
     points_redeemed = 0
@@ -647,8 +649,8 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
         if new_balance > party.credit_limit:
             headroom = party.credit_limit - party.credit_balance
             raise SaleError(
-                f"Credit sale of {money_str(credit_amount)} exceeds {party.name}'s "
-                f"remaining headroom of {money_str(headroom)}"
+                f"Credit sale of {sale_rules.rs(credit_amount)} is more than {party.name}'s remaining credit of "
+                f"{sale_rules.rs(headroom)}."
             )
         party.credit_balance = new_balance
         await party.save(update_fields=["credit_balance"])

@@ -44,15 +44,14 @@ async def issue(face_value: Decimal, party_id: str | None, paid_by: str | None =
     """
     if face_value <= 0:
         raise VoucherError("A voucher has to be worth something.")
-    from app.schemas.types import money_str
-    from app.services import masters_service
+    from app.services import masters_service, sale_rules
 
     # The branch's gift voucher rules (Branch Console > Lists and Settings > Receipt and Vouchers).
     rules = await masters_service.voucher_rules()
     if face_value < rules["minValue"]:
-        raise VoucherError(f"A gift voucher is at least Rs {money_str(rules['minValue'])} at this branch.")
+        raise VoucherError(f"A gift voucher is at least {sale_rules.rs(rules['minValue'])} at this branch.")
     if rules["maxValue"] is not None and face_value > rules["maxValue"]:
-        raise VoucherError(f"A gift voucher is at most Rs {money_str(rules['maxValue'])} at this branch.")
+        raise VoucherError(f"A gift voucher is at most {sale_rules.rs(rules['maxValue'])} at this branch.")
     paid_by = (paid_by or "").strip().upper() or None
     if paid_by is not None and paid_by not in PAID_BY:
         raise VoucherError("Pick how the voucher was paid for: cash, card, bank, Easypaisa, JazzCash, or complimentary.")

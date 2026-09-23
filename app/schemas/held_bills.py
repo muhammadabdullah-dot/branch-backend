@@ -4,7 +4,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 from app.schemas.fbr import FbrStampOut
-from app.schemas.sales import SaleLineIn, SaleLineOut, TenderDetailIn
+from app.schemas.sales import MemberIn, SaleLineIn, SaleLineOut, TenderDetailIn
 from app.schemas.types import Money
 
 
@@ -91,6 +91,8 @@ class SlipPayIn(BaseModel):
     tenders: dict[str, Decimal]
     # What card and online payments carry, as on POST /sales.
     tenderDetails: dict[str, TenderDetailIn] = {}
+    # Who paid, as on a bill: card and online payments need a name and mobile number, and make them a member.
+    member: MemberIn | None = None
     # The payment's own key, minted when the dialog opens: sending it again hands back the same payment, never a second.
     clientRequestId: str = Field(min_length=8, max_length=80)
 
