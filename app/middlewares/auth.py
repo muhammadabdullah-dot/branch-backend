@@ -74,8 +74,22 @@ def refusal(pairs: list[tuple[str, str]], user: User | None = None) -> str:
     return f"This needs one of: {', '.join(names[:4])}. Ask your Branch Manager."
 
 
+SHIPPED_PASSWORD = (
+    "Set your own password before using this branch's software: this sign-in came with the software and every "
+    "branch gets the same one."
+)
+
+
+def refuse_shipped_password(user: User) -> None:
+    """The seeded Branch Manager may sign in, read /me and change their password; everything that is real work
+    waits until they have (models/user.py must_change_password). Hence here and not in get_current_login."""
+    if user.must_change_password:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, SHIPPED_PASSWORD)
+
+
 def require_permission(resource: str, action: str):
     async def checker(user: User = Depends(get_current_user)) -> User:
+        refuse_shipped_password(user)
         if not await has_permission(user, resource, action):
             raise HTTPException(status.HTTP_403_FORBIDDEN, refusal([(resource, action)], user))
         return user
@@ -85,6 +99,7 @@ def require_permission(resource: str, action: str):
 
 async def require_branch_manager(user: User = Depends(get_current_user)) -> User:
     """Staff and access: decided only by a Branch Manager account, whatever else anyone has been given."""
+    refuse_shipped_password(user)
     if user.role_id != "branch-manager":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a Branch Manager can manage staff and their access.")
     return user
@@ -96,6 +111,7 @@ def require_any_permission(*pairs: tuple[str, str]):
     Customer Registry)."""
 
     async def checker(user: User = Depends(get_current_user)) -> User:
+        refuse_shipped_password(user)
         for resource, action in pairs:
             if await has_permission(user, resource, action):
                 return user

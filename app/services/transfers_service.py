@@ -584,8 +584,9 @@ def _carried_note(line: dict) -> str | None:
     return f"Still to complete where it came from: {str(line.get('detailsNote') or 'check its details').strip()}"[:200]
 
 
-async def _describe_new(product: Product | None, sku: str, line: dict, number: str | None) -> Product:
-    """Makes the Item from the line, or, given `product`, makes it over from the line (see _still_provisional)."""
+async def _describe_new(product: Product | None, sku: str, line: dict, number: str | None, sender: str | None = None) -> Product:
+    """Makes the Item from the line, or, given `product`, makes it over from the line (see _still_provisional).
+    `sender` is where the shipment came from, so the Item says so rather than always naming head office."""
     from app.services import price_history_service
 
     note = _provisional_note(number) if line.get("provisional") else _carried_note(line)
@@ -600,7 +601,8 @@ async def _describe_new(product: Product | None, sku: str, line: dict, number: s
     if product is None:
         product_id = sku if not await Product.exists(id=sku) else f"ho-{sku}"
         product = await Product.create(
-            id=product_id[:40], sku=sku[:40], avg_cost=_number(line, "unitCost") or Decimal("0"), remarks="Added by a head office transfer",
+            id=product_id[:40], sku=sku[:40], avg_cost=_number(line, "unitCost") or Decimal("0"),
+            remarks=f"Added by a transfer from {sender}"[:200] if sender else "Added by a head office transfer",
             barcode=await _free_code(line.get("barcode"), sku), **fields,
         )
         await _add_aliases(product, line)
@@ -664,9 +666,10 @@ async def _fill_blanks(product: Product, line: dict) -> None:
 
 # ── applying what head office sends ─────────────────────────────────────────────────────────────
 
-async def _product_for(line: dict, number: str | None = None) -> Product:
+async def _product_for(line: dict, number: str | None = None, sender: str | None = None) -> Product:
     """This branch's Item for a line's code (by code, barcode or alternate barcode), with whatever it left blank filled
-    in from the line; or a new Item made from the line when this branch has never stocked it. `number` is the shipment's."""
+    in from the line; or a new Item made from the line when this branch has never stocked it. `number` is the shipment's,
+    `sender` where it came from."""
     sku = str(line.get("sku") or "").strip()
     if not sku:
         raise TransferError("A transfer line from head office has no Item code.")
@@ -675,9 +678,9 @@ async def _product_for(line: dict, number: str | None = None) -> Product:
         alias = await ProductAlias.get_or_none(code=sku).prefetch_related("product")
         product = alias.product if alias else None
     if not product:
-        return await _describe_new(None, sku, line, number)
+        return await _describe_new(None, sku, line, number, sender)
     if not line.get("provisional") and await _still_provisional(product, number):
-        return await _describe_new(product, product.sku, line, number)
+        return await _describe_new(product, product.sku, line, number, sender)
     await _fill_blanks(product, line)
     return product
 
@@ -772,7 +775,7 @@ async def apply_inbound(state: dict) -> str:
         transfer = await Transfer.create(id=transfer_id, **fields)
         outcome = "created"
     for line in state.get("lines") or []:
-        product = await _product_for(line, transfer.number)
+        product = await _product_for(line, transfer.number, transfer.from_warehouse)
         await TransferLine.create(
             transfer=transfer, product=product, sku=line.get("sku"), qty_sent=Decimal(str(line.get("qtySent") or "0")),
             unit_cost=Decimal(str(line["unitCost"])) if line.get("unitCost") not in (None, "") else None,
@@ -811,7 +814,7 @@ async def _outbound_from_head_office(state: dict) -> Transfer | None:
         notes=state.get("notes"), requested_at=_dt(state.get("requestedAt")) or _now(), **_take_answer(None, state),
     )
     for line in state.get("lines") or []:
-        product = await _product_for(line, transfer.number)
+        product = await _product_for(line, transfer.number, transfer.from_warehouse)
         await TransferLine.create(
             transfer=transfer, product=product, sku=line.get("sku"), qty_sent=Decimal(str(line.get("qtySent") or "0")),
             unit_cost=Decimal(str(line["unitCost"])) if line.get("unitCost") not in (None, "") else None,

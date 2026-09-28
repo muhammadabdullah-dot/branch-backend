@@ -103,9 +103,14 @@ ROLES = [
 # The fixed roles there used to be; `revise_legacy_roles` moves their people onto per-person access.
 LEGACY_ROLES = ("sales-manager", "stock-keeper", "inventory-manager")
 
+# The Branch Manager sign-in the software ships with. Every copy carries the same one, so a new branch has to
+# replace it before it can do anything (models/user.py must_change_password), and it can never be chosen again
+# as a new password (services/auth_service.py).
+SEEDED_BRANCH_MANAGER_PASSWORD = "branch123"
+
 USERS = [
     ("cashier@branch.dmarina.pk", "cashier123", "cashier", "Salesperson"),
-    ("branchmanager@branch.dmarina.pk", "branch123", "branch-manager", "Branch Manager"),
+    ("branchmanager@branch.dmarina.pk", SEEDED_BRANCH_MANAGER_PASSWORD, "branch-manager", "Branch Manager"),
 ]
 
 
@@ -152,6 +157,7 @@ async def _seed_without_demo_data() -> None:
         user = await User.create(
             name=name, email=email.lower(), password_hash=hash_password(password), role_id=role_id,
             title=PRESETS[role_id]["label"], discount_limit=PRESETS[role_id]["discountLimit"],
+            must_change_password=True,
         )
         for template in await RoleDefaultPermission.filter(role_id=role_id):
             await UserPermission.create(user=user, resource=template.resource, can_read=template.can_read,
@@ -242,6 +248,9 @@ async def seed_if_empty() -> None:
         user = await User.create(
             name=name, email=email.lower(), password_hash=hash_password(password), role_id=role_id,
             title=PRESETS[role_id]["label"], discount_limit=PRESETS[role_id]["discountLimit"],
+            # Only the Branch Manager the software ships with, and only as it is created here: a database that
+            # already has its accounts is never asked to change a password somebody chose themselves.
+            must_change_password=role_id == BRANCH_MANAGER,
         )
         templates = await RoleDefaultPermission.filter(role_id=role_id)
         for template in templates:

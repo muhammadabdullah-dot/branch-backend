@@ -58,22 +58,31 @@ async def _loop() -> None:
 
 
 async def _quick_loop() -> None:
-    """Every couple of minutes: collect what head office sent, then send this branch's pending events
-    (a receipt just confirmed, an account just changed). The figures stay on the slow loop above."""
+    """Collect what head office sent, then send this branch's pending events (a receipt just confirmed, an account just
+    changed). The figures stay on the slow loop above.
+
+    Head office holds each check open until it has something to say, so its changes arrive in about a second and the
+    next check follows straight away. A head office that answers at once instead leaves this on its own couple of
+    minutes, exactly as before."""
     from app.services import downstream_service, registration_service, sync_service
 
     await asyncio.sleep(min(settings.sync_startup_delay_seconds, 20))
     while True:
+        held = False
         try:
             if await registration_service.current() is not None:
-                await downstream_service.pull_once(triggered_by="quick")
+                # Listen first, outside the collecting lock: head office answers the moment it has something, and
+                # somebody pressing Sync now meanwhile collects straight away instead of waiting out the hold.
+                listened = await downstream_service.listen_once(settings.sync_pull_wait_seconds)
+                pulled = await downstream_service.pull_once(triggered_by="quick")
+                held = bool(listened and pulled.ok)
                 await sync_service.push_events_once(triggered_by="quick")
                 await sync_service.push_stock_changes_once(triggered_by="quick")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — same rule as the main loop
             logs.log.error("sync quick loop: tick failed", exc_info=exc)
-        await asyncio.sleep(max(settings.sync_quick_interval_seconds, 30))
+        await asyncio.sleep(2 if held else max(settings.sync_quick_interval_seconds, 30))
 
 
 def start() -> None:

@@ -15,6 +15,9 @@ class UserOut(BaseModel):
     title: str | None = None
     # The most bill discount this person may give, and approve for others.
     discountLimit: str = "0"
+    # True while this sign-in still has the password the software shipped with: the app asks for a new one and
+    # the server refuses everything else until it is set.
+    mustChangePassword: bool = False
 
 
 class PermissionOut(BaseModel):

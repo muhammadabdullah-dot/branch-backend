@@ -22,7 +22,8 @@ from app.services import members_service, registration_service, staff_sync_servi
 
 PAGE_SIZE = 200
 MAX_PAGES_PER_RUN = 25
-TIMEOUT_SECONDS = 30.0
+# Longer than the longest hold head office may keep (see sync_pull_wait_seconds), with room for the answer.
+TIMEOUT_SECONDS = 45.0
 
 _lock = asyncio.Lock()
 _manifest_sent = False
@@ -112,6 +113,36 @@ async def _send_acks(client: httpx.AsyncClient, identity: BranchIdentity, state:
         await state.save(update_fields=["pending_acks"])
 
 
+async def listen_once(seconds: int) -> bool:
+    """Ask head office to hold a listen-only question open until it has something for this branch, for up to `seconds`.
+    True when it held it, so the caller can collect and come straight back: that is how a change made at head office
+    reaches this branch in about a second instead of at its next round.
+
+    Nothing is collected or applied here, and it deliberately stays outside `_lock`: waiting must never be what somebody
+    pressing Sync now is queued behind. A head office too old to know the question, or one that can't be reached,
+    answers no, and the caller keeps to its own timing exactly as before this existed."""
+    if seconds <= 0:
+        return False
+    identity = await registration_service.current()
+    if identity is None:
+        return False
+    try:
+        state, _ = await SyncState.get_or_create(id=IDENTITY_PK)
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                f"{identity.cloud_url}/sync/changes",
+                params={"after": state.pull_cursor, "wait": seconds}, headers=_headers(identity),
+            )
+        if response.status_code >= 400:
+            return False
+        return bool(response.json().get("waited"))
+    except httpx.HTTPError:
+        return False
+    except Exception as exc:  # noqa: BLE001 - listening must never be what breaks a tick
+        logs.log.warning("sync: listening to head office failed: %s", _reason(exc))
+        return False
+
+
 async def pull_once(*, triggered_by: str = "scheduler") -> PullResult:
     global _manifest_sent
     result = PullResult()
@@ -140,6 +171,8 @@ async def pull_once(*, triggered_by: str = "scheduler") -> PullResult:
                 await _send_acks(client, identity, state)
 
                 for _ in range(MAX_PAGES_PER_RUN):
+                    # Never held open: collecting answers as fast as head office can, whether the button or the loop
+                    # asked. The waiting is listen_once's job, outside this lock.
                     response = await client.get(
                         f"{identity.cloud_url}/sync/pull", params={"after": state.pull_cursor, "limit": PAGE_SIZE},
                         headers=_headers(identity),

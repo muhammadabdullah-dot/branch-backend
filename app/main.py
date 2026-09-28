@@ -171,6 +171,17 @@ async def _seed() -> None:
 
 
 @app.on_event("startup")
+async def _clear_sync_claim() -> None:
+    """A sync that was going when this server last stopped is over: it stopped with it. Said plainly in the log,
+    because the alternative reading (a sync really is running) is what the branch would otherwise report for the next
+    quarter of an hour."""
+    from app.services import sync_service
+
+    if await sync_service.clear_claim_at_startup():
+        print("  sync: a run was in progress when this server last stopped; the claim has been cleared.", flush=True)
+
+
+@app.on_event("startup")
 async def _start_scheduler() -> None:
     """The sync loop belongs to the server, not to a browser tab — see app/core/scheduler.py. It
     starts whether or not this branch is verified yet; an unverified branch simply finds nothing to

@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     # pending events. Cheap when there's nothing to do, and it's what makes a transfer dispatched at
     # head office show up here in minutes rather than hours.
     sync_quick_interval_seconds: int = 120
+    # How long head office may hold a listen open before answering "nothing yet" (GET /sync/changes). Its changes then
+    # reach this branch in about a second instead of at the next round. Only the background loop listens; collecting is
+    # never held, so Sync now always answers at once. A head office that doesn't hold it costs nothing: the branch
+    # falls back to `sync_quick_interval_seconds`.
+    sync_pull_wait_seconds: int = 25
 
 
 settings = Settings()

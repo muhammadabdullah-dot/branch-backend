@@ -234,6 +234,18 @@ async def _claim(now: datetime, triggered_by: str) -> _Claim | None:
     return _Claim(now) if recovered else None
 
 
+async def clear_claim_at_startup() -> bool:
+    """Put down a claim left standing by the server that last ran, and say whether there was one.
+
+    One server at a time works on this database, so a claim still set as this one starts belongs to a run that no longer
+    exists: the shop's computer was switched off, or the software was restarted, mid-sync. Waiting `STALE_LOCK_AFTER`
+    for the takeover above to notice would refuse every sync, the Sync now button included, for a quarter of an hour
+    after every restart. Nothing is lost by clearing it: an event that was mid-flight is still in the queue, and head
+    office takes the same event twice without doubling anything."""
+    await SyncState.get_or_create(id=IDENTITY_PK)
+    return bool(await SyncState.filter(id=IDENTITY_PK, running=True).update(running=False))
+
+
 async def run_once(*, triggered_by: str = "scheduler") -> SyncResult:
     """One sync run. Safe to call at any time, including while a scheduled run is in flight — the
     second caller is told a run is already going rather than sending the same events twice."""

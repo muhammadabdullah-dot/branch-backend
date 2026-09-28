@@ -20,6 +20,7 @@ async def user_out(user: User, permissions) -> UserOut:
     return UserOut(
         id=str(user.id), name=user.name, email=user.email, roleId=user.role_id, landing=landing, title=user.title,
         discountLimit=format(discount_limit_of(user).normalize(), "f"),
+        mustChangePassword=user.must_change_password,
     )
 
 
@@ -57,10 +58,18 @@ def check_new_password(current_hash: str | None, new: str, confirm: str) -> None
 
 
 async def change_own_password(user: User, current: str, new: str, confirm: str) -> None:
+    from app.services.seed_service import SEEDED_BRANCH_MANAGER_PASSWORD
+
     if not verify_password(current, user.password_hash):
         raise AccountError("Your current password isn't right.")
+    # Checked before the ordinary ones so the seeded Branch Manager, who is typing that very password as the
+    # current one, is told why it can't be the new one too.
+    if new == SEEDED_BRANCH_MANAGER_PASSWORD:
+        raise AccountError("That is the password the software came with, and every branch has it. Pick one only this branch knows.")
     check_new_password(user.password_hash, new, confirm)
     user.password_hash = hash_password(new)
+    # Whoever this is has now chosen their own password, so the branch is free to work (middlewares/auth.py).
+    user.must_change_password = False
     await user.save()
 
 

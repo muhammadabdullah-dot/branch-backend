@@ -10,6 +10,10 @@ class User(models.Model):
         "models.Role", related_name="users"
     )
     active = fields.BooleanField(default=True)
+    # Set on the Branch Manager a new branch database is seeded with, because that sign-in ships with the software
+    # and every branch gets the same one. Until it is cleared (services/auth_service.py) the account may sign in and
+    # set its own password, and nothing else (middlewares/auth.py).
+    must_change_password = fields.BooleanField(default=False)
     # What the person does here, in the branch's own words ("Sales Manager", "Stock Keeper"). Their access
     # is whatever is ticked on the account; the title is for people reading the staff list.
     title = fields.CharField(max_length=80, null=True)
