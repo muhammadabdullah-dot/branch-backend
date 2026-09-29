@@ -59,8 +59,6 @@ class SaleCreateRequest(BaseModel):
     discPercent: Decimal = Decimal("0")
     flatDisc: Decimal = Decimal("0")
     fare: Decimal = Decimal("0")
-    # Who on the floor is credited with the sale. Optional: a shop that does not work that way never sees it.
-    salesperson: str | None = None
     tenders: dict[str, Decimal]
     voucherCode: str | None = None
     # Needed only for a discount above salesperson authority: the signed approval from
@@ -142,8 +140,6 @@ class SaleRecordOut(BaseModel):
     invoiceNumber: str
     at: datetime
     cashierId: str
-    # Who on the floor was credited with the sale, where the shop works that way.
-    salesperson: str | None = None
     partyId: str
     partyName: str
     lines: list[SaleLineOut]

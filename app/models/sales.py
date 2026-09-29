@@ -25,11 +25,6 @@ class SaleRecord(models.Model):
     discount_override_by: fields.ForeignKeyNullableRelation["User"] = fields.ForeignKeyField(
         "models.User", related_name="discount_overrides", null=True
     )
-    # Who on the floor is credited with the sale, where a shop works that way. A name rather than a link to a user,
-    # because the people the old software credits are shop floor staff who never sign in: of its nine, five appear on
-    # bills and none of them is a till user. The names come from a list (masters_service ITEM_LISTS), so the till
-    # offers what the shop keeps rather than whatever was typed last.
-    salesperson = fields.CharField(max_length=80, null=True)
     earned_points = fields.IntField(default=0)
     # The D.Marina member the bill was rung up for, when there was one.
     member: fields.ForeignKeyNullableRelation["Member"] = fields.ForeignKeyField(

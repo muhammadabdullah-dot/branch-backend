@@ -694,7 +694,6 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
         grand_total=grand_total,
         net_value=net_value,
         discount_override_by=override_user,
-        salesperson=(payload.salesperson or "").strip()[:80] or None,
         earned_points=earned_points,
         member=member,
         points_redeemed=points_redeemed,

@@ -36,9 +36,6 @@ ITEM_LISTS: dict[str, tuple[str, str, int, str]] = {
     "pack-unit": ("products", "pack_unit", 40, "pack unit"),
     "gst-rate": ("products", "tax_rate", 6, "GST rate"),
     "customer-group": ("parties", "category", 80, "customer group"),
-    # Not an Item field: who on the floor is credited with a sale. It sits here because this is where a list of names
-    # the shop keeps, and catches up from its own data, already lives.
-    "salesperson": ("sale_records", "salesperson", 80, "salesperson"),
 }
 # The Item form's fields, by the list each one picks from.
 ITEM_FIELD_KINDS: dict[str, str] = {

@@ -63,8 +63,7 @@ async def _sale_out(
     fbr = fbr_stamps.get(str(sale.id)) if fbr_stamps is not None else await fbr_service.stamp_for_sale(sale)
     return SaleRecordOut(
         id=str(sale.id), invoiceNumber=sale.invoice_number, at=sale.at,
-        cashierId=str(sale.cashier_id), salesperson=sale.salesperson,
-        partyId=str(sale.party_id), partyName=sale.party.name,
+        cashierId=str(sale.cashier_id), partyId=str(sale.party_id), partyName=sale.party.name,
         lines=lines,
         gross=sale.gross, discTotal=sale.disc_total, fare=sale.fare, gst=sale.gst,
         grandTotal=sale.grand_total, netValue=sale.net_value,
