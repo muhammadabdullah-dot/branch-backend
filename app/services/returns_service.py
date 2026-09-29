@@ -266,14 +266,10 @@ async def _record_return(
 
 
 async def _outbox(record: ReturnRecord, sale: SaleRecord, cashier: User, exchange: SaleRecord | None = None) -> None:
-    payload = {"against": sale.invoice_number, "refundTotal": str(record.refund_total), "refundMethod": record.refund_method,
-               "number": record.number, "kind": record.kind}
-    if exchange is not None:
-        payload["exchangeInvoice"] = exchange.invoice_number
-    await OutboxEvent.create(
-        aggregate_type="ReturnRecord", aggregate_id=str(record.id), payload=payload,
-        origin_user_id=str(cashier.id), origin_device_id=get_device_id(),
-    )
+    from app.services import document_events_service
+
+    await document_events_service.emit_return(
+        record, cashier, sale, exchangeInvoice=exchange.invoice_number if exchange is not None else None)
 
 
 # A refund:
@@ -764,13 +760,8 @@ async def reverse_voucher_sale(invoice_number: str, processed_by: User, reason: 
 
     await fbr_service.issue_for_return(record, sale)
 
-    await OutboxEvent.create(
-        aggregate_type="ReturnRecord", aggregate_id=str(record.id),
-        payload={
-            "against": sale.invoice_number, "refundTotal": str(amount), "refundMethod": "VOUCHER",
-            "voucherCode": voucher.code, "note": reason, "number": record.number,
-        },
-        origin_user_id=str(processed_by.id), origin_device_id=get_device_id(),
-    )
+    from app.services import document_events_service
+
+    await document_events_service.emit_return(record, processed_by, sale, voucherCode=voucher.code)
     await record.fetch_related("against", "cashier")
     return record

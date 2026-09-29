@@ -365,6 +365,21 @@ async def _return_payload(record: ReturnRecord, sale: SaleRecord, settings: FbrS
 
 # Issuing, inside the bill's or the return's own transaction:
 
+async def _tell_head_office(invoice: FbrInvoice) -> None:
+    """Head office keeps what the tax authority was told, so every change of state travels: posted with their number,
+    or refused with their reason. It keys on the branch, the bill and the kind, so a later message updates the
+    earlier one rather than making a second.
+
+    Never allowed to break the sending. A stamp that reached FBR and failed to reach head office is a nuisance; a
+    stamp that reached neither because the telling threw is a compliance problem."""
+    from app.services import document_events_service
+
+    try:
+        await document_events_service.emit_fbr(invoice)
+    except Exception as exc:  # noqa: BLE001
+        logs.log.warning("fbr: %s %s posted but head office was not told: %s", invoice.kind, invoice.usin, exc)
+
+
 async def issue_for_sale(sale: SaleRecord) -> None:
     """Called by the sales service once a bill's lines and payments are written, in the same transaction. Dummy: the
     test number goes on the bill now. Sandbox or production: the invoice is written, ready to send once the bill has
@@ -508,12 +523,14 @@ async def _post(invoice: FbrInvoice, settings: FbrSettings, timeout: float) -> b
         if invoice.sale_id and len(number) <= 30:
             await SaleRecord.filter(id=invoice.sale_id).update(fbr_invoice_number=number)
         logs.log.info("fbr: %s %s posted to %s, FBR invoice %s", invoice.kind, invoice.usin, invoice.mode, number)
+        await _tell_head_office(invoice)
         return True
     # FBR read it and said no: sending the same again won't change that. It waits for a person.
     invoice.status, invoice.response, invoice.last_error, invoice.next_try_at = "refused", body, _refusal(body), None
     invoice.payload = payload
     await invoice.save(update_fields=["status", "response", "last_error", "next_try_at", "attempts", "payload"])
     logs.log.warning("fbr: %s %s refused by FBR (code %s)", invoice.kind, invoice.usin, code or response.status_code)
+    await _tell_head_office(invoice)
     return True
 
 

@@ -778,15 +778,11 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
 
     await fbr_service.issue_for_sale(sale)
 
-    await OutboxEvent.create(
-        aggregate_type="SaleRecord",
-        aggregate_id=str(sale.id),
-        payload={
-            "invoiceNumber": invoice_number, "netValue": str(net_value), "partyId": str(party.id),
-            "memberCode": member.code if member else None,
-        },
-        origin_user_id=str(cashier.id), origin_device_id=get_device_id(),
-    )
+    # The whole bill, not a note that one happened: head office keeps the document now, and the payload it reads is
+    # built in one place (services/document_events_service.py) so the four points that make a document cannot drift.
+    from app.services import document_events_service
+
+    await document_events_service.emit_sale(sale, cashier)
 
     await sale.fetch_related("lines__product", "tenders", "party", "cashier", "discount_override_by", "member")
     return sale
