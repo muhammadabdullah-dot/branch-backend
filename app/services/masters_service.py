@@ -36,6 +36,9 @@ ITEM_LISTS: dict[str, tuple[str, str, int, str]] = {
     "pack-unit": ("products", "pack_unit", 40, "pack unit"),
     "gst-rate": ("products", "tax_rate", 6, "GST rate"),
     "customer-group": ("parties", "category", 80, "customer group"),
+    # Not an Item field: who on the floor is credited with a sale. It sits here because this is where a list of names
+    # the shop keeps, and catches up from its own data, already lives.
+    "salesperson": ("sale_records", "salesperson", 80, "salesperson"),
 }
 # The Item form's fields, by the list each one picks from.
 ITEM_FIELD_KINDS: dict[str, str] = {
@@ -595,8 +598,21 @@ PRICING_STOCK_DEFAULTS = {"wholesaleDiscountPercent": "7", "lowStockLevel": "20"
 # books (core/pk_time.py).
 TRADING_DAY_KEY = "trading-day"
 TRADING_DAY_DEFAULTS = {"startHour": 0}
+# Where the words go on a cheque leaf. Every figure is millimetres from the top left corner of the leaf, because that
+# is what a person with a ruler and a printed cheque can measure. A bank's leaf is its own size and its boxes are in
+# its own places, so these are nudged once per bank and then left alone; the defaults are an ordinary Pakistani
+# chequebook, 175mm by 80mm, and will be close before anybody touches them.
+CHEQUE_PRINT_KEY = "cheque-print"
+CHEQUE_PRINT_DEFAULTS = {
+    "leafWidthMm": 175, "leafHeightMm": 80,
+    "dateTopMm": 12, "dateLeftMm": 128,
+    "payeeTopMm": 24, "payeeLeftMm": 22,
+    "wordsTopMm": 33, "wordsLeftMm": 22, "wordsSecondLineTopMm": 40,
+    "figuresTopMm": 40, "figuresLeftMm": 128,
+    "printDate": True, "crossed": True, "acPayeeOnly": True,
+}
 _DEFAULTS = {RECEIPT_KEY: RECEIPT_DEFAULTS, VOUCHER_KEY: VOUCHER_DEFAULTS, PRICING_STOCK_KEY: PRICING_STOCK_DEFAULTS,
-             TRADING_DAY_KEY: TRADING_DAY_DEFAULTS}
+             TRADING_DAY_KEY: TRADING_DAY_DEFAULTS, CHEQUE_PRINT_KEY: CHEQUE_PRINT_DEFAULTS}
 
 
 async def get_setting(key: str) -> tuple[dict, ShopSetting | None]:

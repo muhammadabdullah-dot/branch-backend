@@ -179,6 +179,8 @@ async def receive_grn(user: User, payload: GRNCreateRequest) -> GRN:
             raise InventoryError(f"Unknown product {line.productId}")
         if line.qty < 0 or line.bonusQty < 0 or line.unitPrice < 0 or line.flatDisc < 0 or line.misc < 0:
             raise InventoryError(f"{product.name}: quantities, prices, discounts and charges can't be negative.")
+        if line.taxRate < 0 or line.extraTaxRate < 0:
+            raise InventoryError(f"{product.name}: a tax rate can't be negative.")
         if line.qty + line.bonusQty <= 0:
             raise InventoryError(f"{product.name}: nothing received on this line.")
         if line.flatDisc > _line_gross(line):
@@ -220,12 +222,14 @@ async def receive_grn(user: User, payload: GRNCreateRequest) -> GRN:
         gross_total += line.qty * line.unitPrice
         disc_total += line.qty * line.unitPrice - _line_gross(line) + line.flatDisc
         net_total += line_net
-        tax_total += line_net * line.taxRate / Decimal("100")
+        # Both rates sit on the same base, which is what the supplier's invoice does: a further tax is charged on
+        # the value of the goods, not on the GST already charged on them.
+        tax_total += line_net * (line.taxRate + line.extraTaxRate) / Decimal("100")
         await GRNLine.create(
             grn=grn, product=product, qty=line.qty, bonus_qty=line.bonusQty,
             unit_price=line.unitPrice, disc_percent=line.discPercent,
             flat_disc=line.flatDisc, misc=line.misc,
-            expiry=line.expiry, tax_rate=line.taxRate,
+            expiry=line.expiry, tax_rate=line.taxRate, extra_tax_rate=line.extraTaxRate,
             new_sale_price=line.newSalePrice, new_retail_price=line.newRetailPrice,
         )
 

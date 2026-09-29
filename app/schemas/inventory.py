@@ -49,6 +49,9 @@ class GRNLineIn(BaseModel):
     misc: Decimal = Decimal("0")
     expiry: datetime | None = None
     taxRate: Decimal = Decimal("0")
+    # A further tax beyond the GST, on the same goods. Left out, there is none, which is what a delivery had before
+    # this existed.
+    extraTaxRate: Decimal = Decimal("0")
     # A new sale / retail price that arrived with this delivery. Omit to leave the Item's price alone.
     newSalePrice: Decimal | None = None
     newRetailPrice: Decimal | None = None
@@ -100,6 +103,8 @@ class GRNLineOut(BaseModel):
     misc: Money = 0
     expiry: datetime | None = None
     taxRate: Decimal
+    # Zero on every delivery received before a further tax could be recorded, which is what they carried.
+    extraTaxRate: Decimal = 0
     newSalePrice: Money | None = None
     newRetailPrice: Money | None = None
 

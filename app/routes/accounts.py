@@ -14,6 +14,7 @@ from app.services import (
     accounts_money_service,
     accounts_posting_service,
     accounts_reports_service,
+    bank_rec_service,
     vouchers_service,
 )
 from app.services.accounts_areas import access_of
@@ -62,6 +63,7 @@ _lookup = require_any_permission(("accounts.chart", "R"), ("accounts.vouchers", 
 
 ERRORS = (
     vouchers_service.VoucherError, accounts_chart_service.ChartError, accounts_money_service.MoneyError,
+    bank_rec_service.BankRecError,
 )
 
 
@@ -561,6 +563,71 @@ async def opening_suggestion(user: User = Depends(_opening)) -> dict:
     return suggestion
 
 
+# ── agreeing a bank account with its statement ─────────────────────────────────────────────────
+class BankRecIn(BaseModel):
+    accountId: str
+    upTo: Day
+    statementBalance: Decimal
+    note: str | None = None
+
+
+class BankRecTickIn(BaseModel):
+    lineIds: list[str]
+    on: bool = True
+
+
+_bank_rec_read = require_any_permission(("accounts.reports", "R"), ("accounts.settings", "R"))
+_bank_rec_write = require_permission("accounts.settings", "W")
+
+
+@router.get("/bank-reconciliations/accounts")
+async def bank_rec_accounts(user: User = Depends(_bank_rec_read)) -> list[dict]:
+    """The bank accounts this can be run for, and what the books say each holds."""
+    return await bank_rec_service.bank_accounts()
+
+
+@router.get("/bank-reconciliations")
+async def list_bank_recs(accountId: str | None = None, user: User = Depends(_bank_rec_read)) -> list[dict]:
+    return await bank_rec_service.listing(accountId)
+
+
+@router.post("/bank-reconciliations")
+async def open_bank_rec(payload: BankRecIn, user: User = Depends(_bank_rec_write)) -> dict:
+    rec = await _guard(bank_rec_service.open_reconciliation, user, payload.accountId, payload.upTo,
+                       payload.statementBalance, payload.note)
+    return await bank_rec_service.summary(rec.id)
+
+
+@router.get("/bank-reconciliations/{rec_id}")
+async def bank_rec(rec_id: str, user: User = Depends(_bank_rec_read)) -> dict:
+    return {"summary": await _guard(bank_rec_service.summary, rec_id),
+            "entries": await _guard(bank_rec_service.entries, rec_id)}
+
+
+@router.post("/bank-reconciliations/{rec_id}/tick")
+async def tick_bank_rec(rec_id: str, payload: BankRecTickIn, user: User = Depends(_bank_rec_write)) -> dict:
+    changed = await _guard(bank_rec_service.tick, rec_id, payload.lineIds, payload.on)
+    return {"changed": changed, "summary": await bank_rec_service.summary(rec_id)}
+
+
+@router.post("/bank-reconciliations/{rec_id}/close")
+async def close_bank_rec(rec_id: str, user: User = Depends(_bank_rec_write)) -> dict:
+    rec = await _guard(bank_rec_service.close_reconciliation, user, rec_id)
+    return await bank_rec_service.summary(rec.id)
+
+
+@router.post("/bank-reconciliations/{rec_id}/reopen")
+async def reopen_bank_rec(rec_id: str, user: User = Depends(_bank_rec_write)) -> dict:
+    rec = await _guard(bank_rec_service.reopen, user, rec_id)
+    return await bank_rec_service.summary(rec.id)
+
+
+@router.delete("/bank-reconciliations/{rec_id}")
+async def discard_bank_rec(rec_id: str, user: User = Depends(_bank_rec_write)) -> dict:
+    await _guard(bank_rec_service.discard, rec_id)
+    return {"discarded": True}
+
+
 # ── customer payments and cheques ──────────────────────────────────────────────────────────────
 
 class PaymentIn(BaseModel):
@@ -611,6 +678,20 @@ async def void_payment(payment_id: str, payload: VoidIn, user: User = Depends(_v
     return await accounts_money_service.payment_detail(payment)
 
 
+class ChequeLineIn(BaseModel):
+    """One invoice a cheque pays. `invoiceNo` is the supplier's own number, and `grnId` ties it to a delivery of ours
+    where there is one."""
+
+    invoiceNo: str
+    invoiceDate: Day | None = None
+    grnId: str | None = None
+    invoiceAmount: Decimal | None = None
+    outstandingBefore: Decimal | None = None
+    returnAmount: Decimal | None = None
+    paidAmount: Decimal
+    note: str | None = None
+
+
 class ChequeIn(BaseModel):
     direction: str | None = None
     partyAccountId: str | None = None
@@ -621,6 +702,8 @@ class ChequeIn(BaseModel):
     receivedOn: Day | None = None
     amount: Decimal | None = None
     note: str | None = None
+    # The invoices this cheque pays. Left out, they are left alone; an empty list clears them.
+    lines: list[ChequeLineIn] | None = None
 
 
 class ChequeActionIn(BaseModel):

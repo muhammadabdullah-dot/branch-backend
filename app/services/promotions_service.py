@@ -41,6 +41,16 @@ async def for_products(product_ids: list[str], day: date | None = None) -> dict[
     return out
 
 
+async def running(day: date | None = None) -> list[Promotion]:
+    """Every campaign running on `day`, for the till to price a bill with before it saves one.
+
+    The till works a bill out in the browser and the cashier collects against that figure, so it has to know the same
+    campaigns this module applies on the way in. Sending the day's campaigns once, rather than asking per Item as a
+    bill is rung, keeps the screen honest without a round trip per line."""
+    on = day or pk_day()
+    return await Promotion.filter(active=True, starts_on__lte=on, ends_on__gte=on).order_by("-starts_on", "code")
+
+
 def spent_out(promo: Promotion) -> bool:
     """A campaign with a limit that has been reached gives nothing more, at any branch."""
     if promo.qty_limit is not None and (promo.used_qty or ZERO) >= promo.qty_limit:

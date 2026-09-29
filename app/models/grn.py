@@ -63,6 +63,11 @@ class GRNLine(models.Model):
     misc = fields.DecimalField(max_digits=12, decimal_places=2, default=0)
     expiry = fields.DatetimeField(null=True)
     tax_rate = fields.DecimalField(max_digits=5, decimal_places=2, default=0)
+    # A further tax on the same goods, over and above the GST: the old software's EGstPerc2 and EGstPerc3, which its
+    # own shops used on 172,832 of their 282,522 purchase lines. Two rates rather than one because a supplier's
+    # invoice shows them separately and the shop has to be able to tie its own figures back to that invoice. Like the
+    # GST it is a tax and not a cost, so it never touches the Item's average cost.
+    extra_tax_rate = fields.DecimalField(max_digits=5, decimal_places=2, default=0)
     # Sale / retail price set while receiving, when the delivery came with a new price. Null = unchanged.
     new_sale_price = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
     new_retail_price = fields.DecimalField(max_digits=12, decimal_places=2, null=True)

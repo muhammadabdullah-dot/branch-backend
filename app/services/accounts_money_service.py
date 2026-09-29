@@ -14,7 +14,20 @@ from tortoise.models import Model
 from tortoise.transactions import atomic
 
 from app.core.device_context import get_device_id
-from app.models import Account, CashMovement, Cheque, CustomerPayment, OutboxEvent, Party, User, Voucher, next_value
+from app.core.words import amount_in_words
+from app.models import (
+    Account,
+    CashMovement,
+    Cheque,
+    ChequeLine,
+    CustomerPayment,
+    GRN,
+    OutboxEvent,
+    Party,
+    User,
+    Voucher,
+    next_value,
+)
 from app.services import vouchers_service
 from app.services.accounts_chart_service import customer_account, emit_account, money, next_account_code
 from app.services.accounts_reports_service import PKT, shop_day
@@ -279,11 +292,76 @@ async def cheque_out(cheque: Cheque) -> dict:
         "postDated": cheque.status == "pending" and cheque.cheque_date > today,
         "clearedOn": cheque.cleared_on.isoformat() if cheque.cleared_on else None,
         "bouncedOn": cheque.bounced_on.isoformat() if cheque.bounced_on else None,
+        # The words are the amount on a cheque: a bank pays the words when the figures disagree with them. Written
+        # here so the print, the drawer and any report can never write the same sum three different ways.
+        "amountInWords": amount_in_words(cheque.amount),
         "note": cheque.note, "createdBy": cheque.created_by_name,
         "redepositOfId": cheque.redeposit_of_id, "redepositOfNumber": redeposit_of.number if redeposit_of else None,
         "redepositedAsId": str(redeposited_as.id) if redeposited_as else None, "redepositedAsNumber": redeposited_as.number if redeposited_as else None,
+        "lines": await _lines_out(cheque),
         "vouchers": [{"id": str(v.id), "number": v.number, "date": v.date.isoformat(), "typeLabel": vouchers_service.TYPE_LABELS.get(v.vtype, v.vtype)} for v in vouchers],
     }
+
+
+async def _lines_out(cheque: Cheque) -> list[dict]:
+    rows = await ChequeLine.filter(cheque_id=cheque.id).order_by("line_no")
+    return [
+        {
+            "lineNo": l.line_no, "invoiceNo": l.invoice_no,
+            "invoiceDate": l.invoice_date.isoformat() if l.invoice_date else None,
+            "grnId": str(l.grn_id) if l.grn_id else None,
+            "invoiceAmount": format(money(l.invoice_amount), "f"),
+            "outstandingBefore": format(money(l.outstanding_before), "f"),
+            "returnAmount": format(money(l.return_amount), "f"),
+            "paidAmount": format(money(l.paid_amount), "f"),
+            "leftOnInvoice": format(money(l.outstanding_before) - money(l.paid_amount) - money(l.return_amount), "f"),
+            "note": l.note,
+        }
+        for l in rows
+    ]
+
+
+async def _set_lines(cheque: Cheque, lines: list[dict] | None) -> None:
+    """Replace a cheque's invoice lines, or leave them alone when none are given.
+
+    The rule comes from their data rather than from an opinion: every one of the 3,616 old cheques that names invoices
+    has lines adding up to the cheque exactly, and 394 name none at all. So lines are optional, and a cheque that has
+    them balances to the paisa. Anything else would let a cheque say it paid more or less than it was written for."""
+    if lines is None:
+        return
+    await ChequeLine.filter(cheque_id=cheque.id).delete()
+    if not lines:
+        return
+    total = Decimal("0")
+    rows = []
+    for index, raw in enumerate(lines, start=1):
+        invoice_no = str(raw.get("invoiceNo") or "").strip()[:60]
+        if not invoice_no:
+            raise MoneyError(f"Line {index}: which invoice is this paying? Enter its number.")
+        paid = money(raw.get("paidAmount"))
+        if paid <= 0:
+            raise MoneyError(f"Line {index}: enter what this cheque pays off {invoice_no}.")
+        outstanding = money(raw.get("outstandingBefore") or 0)
+        returned = money(raw.get("returnAmount") or 0)
+        if outstanding and paid + returned > outstanding + Decimal("0.01"):
+            raise MoneyError(
+                f"Line {index}: {invoice_no} had Rs {outstanding:,.2f} left on it, and this pays Rs {paid:,.2f}"
+                + (f" with Rs {returned:,.2f} returned" if returned else "") + ". That is more than was owed.")
+        grn_id = raw.get("grnId") or None
+        if grn_id and not await GRN.exists(id=grn_id):
+            raise MoneyError(f"Line {index}: that delivery doesn't exist.")
+        total += paid
+        rows.append(ChequeLine(
+            cheque=cheque, line_no=index, invoice_no=invoice_no,
+            invoice_date=_day(raw["invoiceDate"], f"invoice date on line {index}") if raw.get("invoiceDate") else None,
+            grn_id=grn_id, invoice_amount=money(raw.get("invoiceAmount") or 0), outstanding_before=outstanding,
+            return_amount=returned, paid_amount=paid, note=(str(raw.get("note") or "").strip()[:255] or None),
+        ))
+    if abs(total - money(cheque.amount)) > Decimal("0.01"):
+        raise MoneyError(
+            f"The invoices on this cheque come to Rs {total:,.2f} and the cheque is for Rs {money(cheque.amount):,.2f}. "
+            f"They have to agree: change a line, or change the cheque.")
+    await ChequeLine.bulk_create(rows)
 
 
 async def _party_effect(account: Account, amount: Decimal) -> None:
@@ -356,6 +434,7 @@ async def record_cheque(user: User, payload: dict) -> Cheque:
         cheque_date=_day(payload.get("chequeDate") or received_on, "cheque's date"), received_on=received_on, amount=amount,
         note=(payload.get("note") or "").strip()[:255] or None, created_by_name=user.name,
     )
+    await _set_lines(cheque, payload.get("lines"))
     if direction == "received":
         await _party_effect(account, -amount)
     return cheque
@@ -410,7 +489,23 @@ async def update_cheque(user: User, cheque_id: str, payload: dict) -> Cheque:
     if changes:
         cheque.note = _note(cheque.note, f"Changed by {user.name} ({', '.join(changes)})")
     await cheque.save()
+    # After the amount is saved, so the lines are checked against the amount this cheque now carries. A cheque whose
+    # amount changes and whose lines are left alone would otherwise keep lines that no longer add up to it.
+    if "lines" in payload:
+        await _set_lines(cheque, payload.get("lines"))
+    elif amount != money(cheque.amount) or await ChequeLine.filter(cheque_id=cheque.id).exists():
+        await _set_lines(cheque, await _lines_for_recheck(cheque))
     return cheque
+
+
+async def _lines_for_recheck(cheque: Cheque) -> list[dict]:
+    """The cheque's own lines, as `_set_lines` takes them, so changing the amount re-runs the rule over them."""
+    return [
+        {"invoiceNo": l["invoiceNo"], "invoiceDate": l["invoiceDate"], "grnId": l["grnId"],
+         "invoiceAmount": l["invoiceAmount"], "outstandingBefore": l["outstandingBefore"],
+         "returnAmount": l["returnAmount"], "paidAmount": l["paidAmount"], "note": l["note"]}
+        for l in await _lines_out(cheque)
+    ]
 
 
 def _status_word(cheque: Cheque) -> str:

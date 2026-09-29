@@ -252,6 +252,25 @@ async def build_aggregates() -> dict:
         GROUP BY date(s.at, '+5 hours'), t.code
     """)]
 
+    # What each campaign gave away here, by day. Head office writes the campaigns and cannot see a till, so this is
+    # the only way it learns what one cost and where. A branch running none sends an empty list, which is what a
+    # branch running none should send.
+    promotions = [{
+        "day": r["day"], "promotionCode": r["code"], "promotionName": r["name"], "productSku": r["product_sku"],
+        "lines": r["lines"], "qty": _s(r["qty"]), "given": _s(r["given"]), "netSales": _s(r["net_sales"]),
+    } for r in await _q("""
+        SELECT date(s.at, '+5 hours') AS day, pr.code, pr.name, p.sku AS product_sku,
+               COUNT(*) AS lines, COALESCE(SUM(l.qty), 0) AS qty,
+               COALESCE(SUM(l.disc_amount), 0) AS given,
+               COALESCE(SUM(l.qty * l.unit_price - l.disc_amount), 0) AS net_sales
+        FROM sale_lines l
+        JOIN sale_records s ON s.id = l.sale_id
+        JOIN promotions pr ON pr.id = l.promotion_id
+        LEFT JOIN products p ON p.id = l.product_id
+        WHERE l.promotion_id IS NOT NULL AND l.is_return = 0
+        GROUP BY date(s.at, '+5 hours'), pr.code
+    """)]
+
     overrides = [{
         "day": r["day"], "invoiceNumber": r["invoice_number"], "at": _iso(r["at"]),
         "cashierName": r["cashier_name"], "approvedBy": r["approved_by"],
@@ -299,7 +318,7 @@ async def build_aggregates() -> dict:
 
     return {
         "daily": daily_out, "cashiers": cashiers, "products": products, "productCashiers": product_cashiers, "hourly": hourly,
-        "tillCloses": till_closes, "duties": duties, "tenders": tenders, "overrides": overrides,
+        "tillCloses": till_closes, "duties": duties, "tenders": tenders, "promotions": promotions, "overrides": overrides,
         "returns": return_rows, "creditCustomers": credit,
         "alerts": await build_alerts(), "stockValue": _s(stock_value),
     }

@@ -146,8 +146,51 @@ class VoucherLine(models.Model):
     description = fields.CharField(max_length=255, null=True)
     reference_no = fields.CharField(max_length=60, null=True)
 
+    # The reconciliation this line was ticked onto, meaning it appeared on the bank's statement. Null is not yet
+    # reconciled, which is every line until somebody reconciles the account.
+    reconciliation: fields.ForeignKeyNullableRelation["BankReconciliation"] = fields.ForeignKeyField(
+        "models.BankReconciliation", related_name="lines", null=True, on_delete=fields.SET_NULL
+    )
+
     class Meta:
         table = "acc_voucher_lines"
+
+
+class BankReconciliation(models.Model):
+    """Agreeing a bank account's own books with the bank's statement, as at a date.
+
+    The arithmetic is the whole feature. Everything the books say about the account up to that date is its book
+    balance. What the bank's statement says is the statement balance. The difference is the entries the books know
+    about and the statement does not: cheques written that nobody has presented, and money paid in that has not
+    landed. Tick what is on the statement, and when the ticked entries come to the statement balance, the account is
+    reconciled and what is left is a list somebody can read.
+
+    Their own software has this screen and its table is empty: not one of the 1,330 accounts was ever reconciled in
+    it. It is built here because a shop with a bank account needs it, not because they used it.
+    """
+
+    id = fields.UUIDField(pk=True)
+    number = fields.CharField(max_length=20, unique=True)
+    account: fields.ForeignKeyRelation[Account] = fields.ForeignKeyField(
+        "models.Account", related_name="reconciliations", on_delete=fields.RESTRICT
+    )
+    # Everything dated on or before this day is in scope; anything later waits for the next one.
+    up_to = fields.DateField()
+    # What the bank says the account held on that day.
+    statement_balance = fields.DecimalField(max_digits=16, decimal_places=2)
+    # What the books said, written down when it was closed so a later posting cannot change history.
+    book_balance = fields.DecimalField(max_digits=16, decimal_places=2, null=True)
+    # open · closed
+    status = fields.CharField(max_length=10, default="open")
+    closed_at = fields.DatetimeField(null=True)
+    closed_by_name = fields.CharField(max_length=120, null=True)
+    note = fields.CharField(max_length=255, null=True)
+    created_by_name = fields.CharField(max_length=120, null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "acc_bank_reconciliations"
 
 
 class AccountsSettings(models.Model):
@@ -227,3 +270,39 @@ class Cheque(models.Model):
 
     class Meta:
         table = "cheques"
+
+
+class ChequeLine(models.Model):
+    """Which invoice a cheque pays, and how much of it.
+
+    One cheque settles several invoices, which is how a shop actually pays a supplier: 3,616 of the old software's
+    4,010 post dated cheques name the invoices they cover, one naming as many as ten. Without this a cheque is a
+    number against a party and nobody can say afterwards what it was for.
+
+    Lines are optional, as they are in their data: 394 of their cheques carry none. But a cheque that has lines has
+    lines that add up to it, exactly, on all 3,616 of theirs, and that rule is enforced here.
+    """
+
+    id = fields.UUIDField(pk=True)
+    cheque: fields.ForeignKeyRelation[Cheque] = fields.ForeignKeyField("models.Cheque", related_name="lines")
+    line_no = fields.IntField(default=1)
+    # The supplier's own invoice number (or the customer's), as written on it. Free text because a cheque often pays
+    # invoices from before any of this, and a delivery of ours may never have existed for them.
+    invoice_no = fields.CharField(max_length=60)
+    invoice_date = fields.DateField(null=True)
+    # Our own delivery, where the invoice is one we received. Null leaves the line standing on its invoice number.
+    grn: fields.ForeignKeyNullableRelation["GRN"] = fields.ForeignKeyField(  # noqa: F821
+        "models.GRN", related_name="cheque_lines", null=True, on_delete=fields.SET_NULL
+    )
+    invoice_amount = fields.DecimalField(max_digits=14, decimal_places=2, default=0)
+    # What was still owed on that invoice before this cheque, and what goes back on it as returned goods. Both are
+    # what makes the arithmetic on a line readable a year later: paid, plus returned, plus what is left, is what was
+    # outstanding. 638 of their 6,605 lines carry a return.
+    outstanding_before = fields.DecimalField(max_digits=14, decimal_places=2, default=0)
+    return_amount = fields.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid_amount = fields.DecimalField(max_digits=14, decimal_places=2)
+    note = fields.CharField(max_length=255, null=True)
+
+    class Meta:
+        table = "cheque_lines"
+        unique_together = (("cheque", "line_no"),)

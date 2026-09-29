@@ -14,6 +14,7 @@ from app.schemas.sales import (
     ReturnCreateRequest,
     ReturnQuoteRequest,
     ReturnRecordOut,
+    RunningPromotionOut,
     SaleCreateRequest,
     SaleListOut,
     SaleRecordOut,
@@ -39,6 +40,14 @@ _reprint = require_permission("store.reprint", "X")
 @router.get("/sales/next-invoice-number", response_model=NextInvoiceNumberOut)
 async def next_invoice_number(user: User = Depends(_read)) -> NextInvoiceNumberOut:
     return await sales_controller.next_invoice_number()
+
+
+@router.get("/sales/promotions", response_model=list[RunningPromotionOut])
+async def running_promotions(user: User = Depends(_read)) -> list[RunningPromotionOut]:
+    """The campaigns running today. Billing.tsx reads these because it works a bill out in the browser and the cashier
+    collects against that figure: without them the screen would show the Item's own discount while the saved bill
+    carried the campaign's."""
+    return await sales_controller.running_promotions()
 
 
 @router.get("/sales", response_model=SaleListOut)

@@ -94,6 +94,7 @@ def _grn_out(grn: GRN, names: dict[str, Product]) -> GRNOut:
             productId=product_id, productName=name, productSku=sku,
             qty=l.qty, bonusQty=l.bonus_qty, unitPrice=l.unit_price,
             discPercent=l.disc_percent, flatDisc=l.flat_disc, misc=l.misc, expiry=l.expiry, taxRate=l.tax_rate,
+            extraTaxRate=l.extra_tax_rate,
             newSalePrice=l.new_sale_price, newRetailPrice=l.new_retail_price,
         ))
     return GRNOut(

@@ -10,14 +10,35 @@ from app.schemas.sales import (
     ReceiptReprintOut,
     SaleCreateRequest,
     SaleLineOut,
+    RunningPromotionOut,
     SaleListOut,
     SaleRecordOut,
     SaleSlipOut,
     SaleTenderOut,
 )
-from app.services import discount_approval_service, fbr_service, media_service, pharmacy_service, sales_service
+from app.services import (
+    discount_approval_service,
+    fbr_service,
+    media_service,
+    pharmacy_service,
+    promotions_service,
+    sales_service,
+)
 from app.schemas.fbr import FbrStampOut
 from app.schemas.sales import PaymentProofOut
+
+
+async def running_promotions() -> list[RunningPromotionOut]:
+    """Today's campaigns, for the till to price with. The same rows services/promotions_service.py applies on the way
+    in, so what the cashier sees on screen and what the saved bill says cannot differ."""
+    return [
+        RunningPromotionOut(
+            id=promo.id, code=promo.code, name=promo.name, productId=str(promo.product_id), kind=promo.kind,
+            discPercent=promo.disc_percent, discFlat=promo.disc_flat, promoPrice=promo.promo_price,
+            minQty=promo.min_qty, endsOn=promo.ends_on, spent=promotions_service.spent_out(promo),
+        )
+        for promo in await promotions_service.running()
+    ]
 
 
 async def _sale_out(
@@ -42,7 +63,8 @@ async def _sale_out(
     fbr = fbr_stamps.get(str(sale.id)) if fbr_stamps is not None else await fbr_service.stamp_for_sale(sale)
     return SaleRecordOut(
         id=str(sale.id), invoiceNumber=sale.invoice_number, at=sale.at,
-        cashierId=str(sale.cashier_id), partyId=str(sale.party_id), partyName=sale.party.name,
+        cashierId=str(sale.cashier_id), salesperson=sale.salesperson,
+        partyId=str(sale.party_id), partyName=sale.party.name,
         lines=lines,
         gross=sale.gross, discTotal=sale.disc_total, fare=sale.fare, gst=sale.gst,
         grandTotal=sale.grand_total, netValue=sale.net_value,

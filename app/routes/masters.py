@@ -220,6 +220,22 @@ async def _trading_day_out() -> TradingDayOut:
                          updatedBy=row.updated_by_name if row else None)
 
 
+@router.get("/settings/cheque-print")
+async def cheque_print(user: User = Depends(_receipt_read)) -> dict:
+    """Where the words go on a cheque leaf, in millimetres from its top left corner."""
+    value, row = await svc.get_setting(svc.CHEQUE_PRINT_KEY)
+    return {**value, "updatedAt": row.updated_at if row else None, "updatedBy": row.updated_by_name if row else None}
+
+
+@router.put("/settings/cheque-print")
+async def save_cheque_print(payload: dict, user: User = Depends(_settings_write)) -> dict:
+    """Nudged once per bank against a real leaf and then left alone. Only the keys the setting knows are kept, so a
+    stray field from an older screen cannot creep in."""
+    await svc.put_setting(svc.CHEQUE_PRINT_KEY, payload, user)
+    value, row = await svc.get_setting(svc.CHEQUE_PRINT_KEY)
+    return {**value, "updatedAt": row.updated_at if row else None, "updatedBy": row.updated_by_name if row else None}
+
+
 @router.get("/settings/trading-day", response_model=TradingDayOut)
 async def trading_day(user: User = Depends(_receipt_read)) -> TradingDayOut:
     """When the shop's day begins. Midnight unless this shop sells past it, in which case the small hours belong to

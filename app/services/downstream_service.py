@@ -96,6 +96,10 @@ async def apply(kind: str, payload: dict) -> str:
         from app.services import supplier_sync_service
 
         return await supplier_sync_service.apply_list(payload)
+    if kind == "promotion.upsert":
+        from app.services import promotion_sync_service
+
+        return await promotion_sync_service.apply_upsert(payload)
     # A newer head office can send kinds this branch software doesn't know yet; say so rather than fail.
     return "unknown-kind"
 

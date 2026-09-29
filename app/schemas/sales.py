@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -59,6 +59,8 @@ class SaleCreateRequest(BaseModel):
     discPercent: Decimal = Decimal("0")
     flatDisc: Decimal = Decimal("0")
     fare: Decimal = Decimal("0")
+    # Who on the floor is credited with the sale. Optional: a shop that does not work that way never sees it.
+    salesperson: str | None = None
     tenders: dict[str, Decimal]
     voucherCode: str | None = None
     # Needed only for a discount above salesperson authority: the signed approval from
@@ -140,6 +142,8 @@ class SaleRecordOut(BaseModel):
     invoiceNumber: str
     at: datetime
     cashierId: str
+    # Who on the floor was credited with the sale, where the shop works that way.
+    salesperson: str | None = None
     partyId: str
     partyName: str
     lines: list[SaleLineOut]
@@ -223,6 +227,24 @@ class ReturnRecordOut(BaseModel):
 
 class PaymentProofOut(BaseModel):
     proofId: str
+
+
+class RunningPromotionOut(BaseModel):
+    """A campaign the till may apply today. Only what pricing a line needs: the till never edits one."""
+
+    id: str
+    code: str
+    name: str
+    productId: str
+    kind: str
+    discPercent: Decimal
+    discFlat: Decimal
+    promoPrice: Decimal | None
+    minQty: Decimal
+    endsOn: date
+    # A campaign whose limit is already reached gives nothing more, at any till. Worked out here rather than sent as
+    # two limits and two running totals, so the browser cannot reach a different answer than the server.
+    spent: bool
 
 
 class NextInvoiceNumberOut(BaseModel):
