@@ -24,7 +24,10 @@ from app.models import (
 )
 from app.schemas.sales import SaleCreateRequest
 from app.schemas.types import money_str
-from app.services import discount_approval_service, gift_voucher_service, media_service, members_service, sale_rules, sell_levels
+from app.services import (
+    discount_approval_service, gift_voucher_service, media_service, members_service, promotions_service, sale_rules,
+    sell_levels,
+)
 
 DISCOUNT_LIMIT_PERCENT = Decimal("5")
 # Payments that always need the customer's name and mobile number, and make them a member.
@@ -314,6 +317,20 @@ def _item_disc(line, product: Product, alias: ProductAlias | None) -> Decimal:
     return sign * min(amount, value)
 
 
+def _line_disc(line, product: Product, alias: ProductAlias | None, promos: list | None) -> tuple[Decimal, object | None]:
+    """What comes off this line before the bill's own discount, and the campaign it came from if a campaign won.
+
+    A campaign replaces the Item's own discount rather than adding to it (services/promotions_service.py), so an Item
+    marked 10% off and a campaign at 15% off sells at 15% off. A line coming back takes back what it had on its own
+    bill and is never touched by a campaign running today."""
+    own = _item_disc(line, product, alias)
+    if line.isReturn or not promos:
+        return own, None
+    gross = abs(_line_gross(line, line.unitPrice))
+    promo, amount = promotions_service.best(promos, line.unitPrice, line.qty, gross)
+    return (amount, promo) if amount > abs(own) else (own, None)
+
+
 async def returned_on_bills(sale: SaleRecord, product_id: str) -> Decimal:
     """How much of an Item later bills took back as return lines naming this bill (Billing's return mode), in stocked
     units. The Returns screen counts these as already returned too."""
@@ -515,9 +532,19 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
     # The Item's own discount comes first and needs no one's approval: it's set on the Item. A line
     # rung up by a pack barcode takes that pack's discount instead (flat is per pack).
     # A line coming back takes back the discount it had on its bill, not the Item's discount today.
-    raw_item_discs = [
-        -return_discs[id(l)] if l.isReturn else _item_disc(l, products[l.productId], aliases.get(i)) for i, l in enumerate(payload.lines)
-    ]
+    # Campaigns running today, read once for the whole bill. The shop's own day decides which are running, so a
+    # campaign that ends today is still running in the small hours where the day runs past midnight (core/pk_time.py).
+    running = await promotions_service.for_products([l.productId for l in payload.lines if not l.isReturn])
+    line_promos: list[object | None] = []
+    raw_item_discs = []
+    for i, l in enumerate(payload.lines):
+        if l.isReturn:
+            raw_item_discs.append(-return_discs[id(l)])
+            line_promos.append(None)
+            continue
+        amount, promo = _line_disc(l, products[l.productId], aliases.get(i), running.get(l.productId))
+        raw_item_discs.append(amount)
+        line_promos.append(promo)
     # No discount sells at a loss (services/sale_rules.py): the Item's own discount stops at its floor, an Item already
     # priced at or below cost takes none, and a bill discount (never on Lock Discount Items or on what the bill takes
     # back) is shared by the profit each line has left.
@@ -691,6 +718,7 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
             return_of_invoice=returns_of.get(id(line)),
             level_detail=sell_levels.detail(product, line.level) if line.level else None,
             disc_amount=line_disc.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            promotion_id=getattr(line_promos[index], "id", None) if index < len(line_promos) else None,
             unit_cost=product.avg_cost,
             tax_amount=((_line_gross(line, line.unitPrice) - line_disc) * product.tax_rate / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
         )
@@ -735,6 +763,17 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
             await gift_voucher_service.redeem(payload.voucherCode, voucher_amount, invoice_number, str(party.id))
         except gift_voucher_service.VoucherError as exc:
             raise SaleError(exc.message) from exc
+
+    # What the campaigns gave away, added to their running totals so a limit means something at this till from the
+    # next bill onwards, without waiting for head office to tell it (services/promotions_service.py).
+    used: dict[str, tuple[Decimal, Decimal]] = {}
+    for line, promo, disc in zip(payload.lines, line_promos, item_discs):
+        if promo is None:
+            continue
+        qty, amount = used.get(promo.id, (ZERO, ZERO))
+        used[promo.id] = (qty + abs(line.qty), amount + abs(disc))
+    if used:
+        await promotions_service.record_use(used)
 
     # Scan history: the lines still open on this bill were sold.
     from app.services import scan_history_service

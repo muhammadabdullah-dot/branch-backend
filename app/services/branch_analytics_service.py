@@ -27,7 +27,7 @@ from decimal import Decimal
 
 from tortoise import Tortoise
 
-from app.core.pk_time import PKT, today_pk
+from app.core.pk_time import PKT, today_pk, with_shop_day
 
 A_CUT = 0.80
 B_CUT = 0.95
@@ -51,7 +51,9 @@ class AnalysisError(Exception):
 
 
 async def q(sql: str, params: list | None = None) -> list[dict]:
-    return await Tortoise.get_connection("default").execute_query_dict(sql, params or [])
+    # Every query here and in branch_kpi_service comes through this one door, which is where a day that does not
+    # begin at midnight is applied (core/pk_time.py).
+    return await Tortoise.get_connection("default").execute_query_dict(with_shop_day(sql), params or [])
 
 
 def shop_today() -> date:

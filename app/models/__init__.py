@@ -26,6 +26,7 @@ from app.models.inventory import StockMovement, balance_for
 from app.models.location import Location
 from app.models.login_session import LoginSession, UserDevice
 from app.models.masters import ListEntry, ShopSetting
+from app.models.promotion import Promotion
 from app.models.notice import Notice, NoticeRead
 from app.models.member import LoyaltyEntry, LoyaltySettings, Member
 from app.models.party import Party, PartyContact
@@ -77,6 +78,7 @@ __all__ = [
     "PaymentMethod",
     "Location",
     "ListEntry",
+    "Promotion",
     "ShopSetting",
     "Supplier",
     "Device",

@@ -171,6 +171,16 @@ async def _seed() -> None:
 
 
 @app.on_event("startup")
+async def _load_trading_day() -> None:
+    """When this shop's day begins, read once so every figure below agrees with every other (core/pk_time.py)."""
+    from app.services import masters_service
+
+    hour = await masters_service.load_trading_day()
+    if hour:
+        print(f"  the shop's day begins at {hour:02d}:00, so the small hours count as the day before", flush=True)
+
+
+@app.on_event("startup")
 async def _clear_sync_claim() -> None:
     """A sync that was going when this server last stopped is over: it stopped with it. Said plainly in the log,
     because the alternative reading (a sync really is running) is what the branch would otherwise report for the next

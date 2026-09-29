@@ -133,3 +133,15 @@ class PricingStockIn(BaseModel):
 class PricingStockOut(PricingStockIn):
     updatedAt: datetime | None = None
     updatedBy: str | None = None
+
+
+class TradingDayIn(BaseModel):
+    # The hour the shop's day begins, on its own clock. 0 is midnight; a shop that opens at eight and sells past
+    # midnight says 8, and then a bill at half past midnight belongs to the day that is still going on.
+    startHour: int = Field(ge=0, le=23)
+
+
+class TradingDayOut(BaseModel):
+    startHour: int
+    updatedAt: datetime | None = None
+    updatedBy: str | None = None

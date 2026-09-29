@@ -69,6 +69,12 @@ class SaleLine(models.Model):
     disc_amount = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
     # The Item's average cost at the moment of sale, so profit reports don't drift as costs move.
     unit_cost = fields.DecimalField(max_digits=12, decimal_places=4, null=True)
+    # Added 2026-09-29. The campaign that gave this line its discount, when one did (models/promotion.py). The money
+    # is already in `disc_amount`; this says which decision it came from, so a campaign can be reported on and a
+    # customer asking why the price differs can be answered.
+    promotion: fields.ForeignKeyNullableRelation["Promotion"] = fields.ForeignKeyField(  # noqa: F821
+        "models.Promotion", related_name="sale_lines", null=True, on_delete=fields.SET_NULL
+    )
     # The GST charged on this line (after its discount). Null on sales from before this was recorded.
     tax_amount = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
     # Added 2026-09-18. A line sold in other amounts than the stocked unit (services/sell_levels.py): "piece" or "strip"

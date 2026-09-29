@@ -24,7 +24,7 @@ from decimal import Decimal
 
 from tortoise import Tortoise
 
-from app.core.pk_time import pk_day, today_pk
+from app.core.pk_time import pk_day, today_pk, with_shop_day
 
 # Times are stored as UTC instants. Every day and hour below is the Pakistan one, date(at, '+5 hours') and
 # strftime('%H', at, '+5 hours') (core/pk_time.py), the same as the branch's own Reports: a sale at 2 am is on the
@@ -60,7 +60,8 @@ _ITEM_LINES = """
 
 
 async def _q(sql: str) -> list[dict]:
-    return await Tortoise.get_connection("default").execute_query_dict(sql)
+    # The figures head office is sent must be cut on the same day boundary the branch's own reports use.
+    return await Tortoise.get_connection("default").execute_query_dict(with_shop_day(sql))
 
 
 def _iso(v) -> str | None:

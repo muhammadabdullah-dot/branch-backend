@@ -12,6 +12,7 @@ from tortoise import Tortoise
 from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
+from app.core import pk_time
 from app.models import Account, Counter, ListEntry, PaymentMethod, ShopSetting, User
 
 
@@ -588,7 +589,14 @@ VOUCHER_DEFAULTS = {"validityDays": 180, "minValue": "100", "maxValue": None}
 # own reorder level is low stock below this. 7% and 20 are what the software always used.
 PRICING_STOCK_KEY = "pricing-stock"
 PRICING_STOCK_DEFAULTS = {"wholesaleDiscountPercent": "7", "lowStockLevel": "20"}
-_DEFAULTS = {RECEIPT_KEY: RECEIPT_DEFAULTS, VOUCHER_KEY: VOUCHER_DEFAULTS, PRICING_STOCK_KEY: PRICING_STOCK_DEFAULTS}
+# When the shop's day begins, on its own clock. 0 is midnight, which is what a shop that closes in the evening means
+# by a day. A shop selling past midnight sets the hour it opens instead, and then the small hours count as the day
+# before: the drawer counted at 2 am belongs to the evening that is still going on, and so do its figures and its
+# books (core/pk_time.py).
+TRADING_DAY_KEY = "trading-day"
+TRADING_DAY_DEFAULTS = {"startHour": 0}
+_DEFAULTS = {RECEIPT_KEY: RECEIPT_DEFAULTS, VOUCHER_KEY: VOUCHER_DEFAULTS, PRICING_STOCK_KEY: PRICING_STOCK_DEFAULTS,
+             TRADING_DAY_KEY: TRADING_DAY_DEFAULTS}
 
 
 async def get_setting(key: str) -> tuple[dict, ShopSetting | None]:
@@ -637,3 +645,21 @@ async def pricing_stock() -> dict:
 async def low_stock_level() -> Decimal:
     """Below this an Item without its own reorder level is low stock."""
     return (await pricing_stock())["lowStockLevel"]
+
+
+async def trading_day_start_hour() -> int:
+    """The hour the shop's day begins, as a number between 0 and 23."""
+    value, _ = await get_setting(TRADING_DAY_KEY)
+    try:
+        hour = int(value.get("startHour") or 0)
+    except (TypeError, ValueError):
+        hour = 0
+    return hour if 0 <= hour <= 23 else 0
+
+
+async def load_trading_day() -> int:
+    """Tell the clock what the shop said. Called as the server starts and again whenever the setting is saved, so
+    every figure worked out afterwards uses the same day boundary."""
+    hour = await trading_day_start_hour()
+    pk_time.set_day_start_hour(hour)
+    return hour

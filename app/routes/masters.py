@@ -12,7 +12,7 @@ from app.schemas.import_result import ImportRowError, ImportSummary
 from app.schemas.masters import (
     BankAccountOut, ItemListChoicesOut, ListEntryCreate, ListEntryOut, ListEntryUpdate, ListSummaryOut, PaymentMethodOut,
     PaymentMethodsOut, PaymentMethodUpdate, PricingStockIn, PricingStockOut, ReasonCreate, ReasonUpdate, ReceiptSettingsIn,
-    ReceiptSettingsOut, VoucherRulesIn, VoucherRulesOut,
+    ReceiptSettingsOut, TradingDayIn, TradingDayOut, VoucherRulesIn, VoucherRulesOut,
 )
 from app.services import masters_service as svc
 from app.services.import_service import parse_rows
@@ -211,6 +211,30 @@ async def _vouchers_out() -> VoucherRulesOut:
     rules = await svc.voucher_rules()
     _, row = await svc.get_setting(svc.VOUCHER_KEY)
     return VoucherRulesOut(**rules, updatedAt=row.updated_at if row else None, updatedBy=row.updated_by_name if row else None)
+
+
+async def _trading_day_out() -> TradingDayOut:
+    hour = await svc.trading_day_start_hour()
+    _, row = await svc.get_setting(svc.TRADING_DAY_KEY)
+    return TradingDayOut(startHour=hour, updatedAt=row.updated_at if row else None,
+                         updatedBy=row.updated_by_name if row else None)
+
+
+@router.get("/settings/trading-day", response_model=TradingDayOut)
+async def trading_day(user: User = Depends(_receipt_read)) -> TradingDayOut:
+    """When the shop's day begins. Midnight unless this shop sells past it, in which case the small hours belong to
+    the day before, exactly as the people counting the drawer would say."""
+    return await _trading_day_out()
+
+
+@router.put("/settings/trading-day", response_model=TradingDayOut)
+async def save_trading_day(payload: TradingDayIn, user: User = Depends(_settings_write)) -> TradingDayOut:
+    """Changing this changes which day past bills belong to, not just future ones: the figures are worked out from
+    the bills each time, so yesterday's totals can move once when the hour changes. The books repost on their next
+    run, and head office takes the new figures on the next full sync."""
+    await svc.put_setting(svc.TRADING_DAY_KEY, {"startHour": payload.startHour}, user)
+    await svc.load_trading_day()
+    return await _trading_day_out()
 
 
 @router.get("/settings/gift-vouchers", response_model=VoucherRulesOut)
