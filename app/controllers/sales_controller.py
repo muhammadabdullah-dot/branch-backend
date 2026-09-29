@@ -35,7 +35,7 @@ async def running_promotions() -> list[RunningPromotionOut]:
         RunningPromotionOut(
             id=promo.id, code=promo.code, name=promo.name, productId=str(promo.product_id), kind=promo.kind,
             discPercent=promo.disc_percent, discFlat=promo.disc_flat, promoPrice=promo.promo_price,
-            minQty=promo.min_qty, endsOn=promo.ends_on, spent=promotions_service.spent_out(promo),
+            minQty=promo.min_qty, endsOn=promo.ends_on,
         )
         for promo in await promotions_service.running()
     ]

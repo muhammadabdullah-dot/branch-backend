@@ -10,9 +10,12 @@ writing a promotional price straight onto the line: a bill always shows what the
 campaign written as a price is turned into the discount that reaches it.
 
 The old software's own campaigns, which these have to be able to carry: 11,364 of them, almost all a percentage off
-one Item for a window of days (5% on 6,474, 10% on 3,892), a handful flat, 24 at a fixed price. Its bonus quantity
-and its spend and quantity limits were never used in ten years of running, but they are here because they are part
-of what a campaign means and a shop may want them tomorrow.
+one Item for a window of days (5% on 6,474, 10% on 3,892), a handful flat, 24 at a fixed price.
+
+**What a campaign deliberately is not.** Its schema also offers free units, a quantity limit and a spend limit, and
+not one of its 11,364 campaigns uses any of them. They were carried here for a day on the argument that they are
+part of what a campaign means and a shop may want them tomorrow; that is the same argument that put a salesperson on
+a bill and took it off again, so they are gone. A campaign is one Item, a window of days, and a discount.
 """
 from tortoise import fields, models
 
@@ -38,15 +41,9 @@ class Promotion(models.Model):
     # A campaign written as "this Item is 199 while it runs". Kept as the price it names; the till turns it into the
     # discount that reaches it from whatever the Item costs that day.
     promo_price = fields.DecimalField(max_digits=12, decimal_places=2, null=True)
-    # Below this many, the campaign does not apply. 1 means every one.
+    # Below this many, the campaign does not apply. 1 means every one, which is what all 11,364 of theirs are: it is
+    # kept because "three for the price of two" is the first thing a shop asks for, not because they used it.
     min_qty = fields.DecimalField(max_digits=12, decimal_places=3, default=1)
-    # Free units that go on the bill with the paid ones, and come off stock with them.
-    bonus_qty = fields.DecimalField(max_digits=12, decimal_places=3, default=0)
-    # What the campaign may give away in all, across every branch, and what it has given so far. Null is no limit.
-    qty_limit = fields.DecimalField(max_digits=14, decimal_places=3, null=True)
-    amount_limit = fields.DecimalField(max_digits=14, decimal_places=2, null=True)
-    used_qty = fields.DecimalField(max_digits=14, decimal_places=3, default=0)
-    used_amount = fields.DecimalField(max_digits=14, decimal_places=2, default=0)
     active = fields.BooleanField(default=True)
     remarks = fields.CharField(max_length=255, null=True)
     # Head office's revision, so a message that arrives out of order never undoes a newer one (the same guard the

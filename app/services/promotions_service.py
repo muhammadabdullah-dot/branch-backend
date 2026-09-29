@@ -51,18 +51,11 @@ async def running(day: date | None = None) -> list[Promotion]:
     return await Promotion.filter(active=True, starts_on__lte=on, ends_on__gte=on).order_by("-starts_on", "code")
 
 
-def spent_out(promo: Promotion) -> bool:
-    """A campaign with a limit that has been reached gives nothing more, at any branch."""
-    if promo.qty_limit is not None and (promo.used_qty or ZERO) >= promo.qty_limit:
-        return True
-    return promo.amount_limit is not None and (promo.used_amount or ZERO) >= promo.amount_limit
-
-
 def discount(promo: Promotion, unit_price: Decimal, qty: Decimal, gross: Decimal) -> Decimal:
     """What this campaign takes off a line of `qty` at `unit_price`, worth `gross` before anything comes off.
 
     Never more than the line is worth: a campaign that would make an Item free makes it free, not owed."""
-    if qty <= 0 or gross <= 0 or spent_out(promo):
+    if qty <= 0 or gross <= 0:
         return ZERO
     if promo.min_qty and qty < promo.min_qty:
         return ZERO
@@ -85,18 +78,3 @@ def best(promos: list[Promotion] | None, unit_price: Decimal, qty: Decimal, gros
         if amount > most:
             winner, most = promo, amount
     return winner, most
-
-
-async def record_use(uses: dict[str, tuple[Decimal, Decimal]]) -> None:
-    """Add what a bill just used to each campaign's running total, so a limit means something.
-
-    Keyed by campaign id, with the quantity sold under it and the money it gave away. Head office is told through the
-    ordinary event stream; a branch's own copy is updated here so a limit reached mid-day stops at that till without
-    waiting for a round trip."""
-    for promo_id, (qty, amount) in uses.items():
-        promo = await Promotion.get_or_none(id=promo_id)
-        if promo is None:
-            continue
-        promo.used_qty = (promo.used_qty or ZERO) + qty
-        promo.used_amount = (promo.used_amount or ZERO) + amount
-        await promo.save(update_fields=["used_qty", "used_amount", "updated_at"])

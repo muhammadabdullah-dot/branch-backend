@@ -238,9 +238,6 @@ class RunningPromotionOut(BaseModel):
     promoPrice: Decimal | None
     minQty: Decimal
     endsOn: date
-    # A campaign whose limit is already reached gives nothing more, at any till. Worked out here rather than sent as
-    # two limits and two running totals, so the browser cannot reach a different answer than the server.
-    spent: bool
 
 
 class NextInvoiceNumberOut(BaseModel):

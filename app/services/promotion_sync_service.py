@@ -32,7 +32,8 @@ def _decimal(value, fallback=ZERO) -> Decimal:
 
 
 def _maybe_decimal(value) -> Decimal | None:
-    return None if value in (None, "") else _decimal(value)
+    """A price campaign names a price; the other two kinds name none, and null is not zero."""
+    return None if value in (None, '') else _decimal(value)
 
 
 async def apply_upsert(payload: dict) -> str:
@@ -61,14 +62,11 @@ async def apply_upsert(payload: dict) -> str:
         "kind": (data.get("kind") or "percent"),
         "disc_percent": _decimal(data.get("discPercent")), "disc_flat": _decimal(data.get("discFlat")),
         "promo_price": _maybe_decimal(data.get("promoPrice")),
-        "min_qty": _decimal(data.get("minQty"), Decimal("1")), "bonus_qty": _decimal(data.get("bonusQty")),
-        "qty_limit": _maybe_decimal(data.get("qtyLimit")), "amount_limit": _maybe_decimal(data.get("amountLimit")),
+        "min_qty": _decimal(data.get("minQty"), Decimal("1")),
         "active": bool(data.get("active", True)),
         "remarks": (data.get("remarks") or None), "rev": rev,
     }
     if existing is None:
-        # What it has already given stays at zero on a campaign this branch is meeting for the first time. The limit
-        # is the company's, and head office knows the running total from what every branch reports.
         await Promotion.create(id=promo_id, **columns)
         return f"{code} added, {'running' if columns['active'] else 'switched off'}"
     for column, value in columns.items():

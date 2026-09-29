@@ -764,16 +764,8 @@ async def create_sale(cashier: User, payload: SaleCreateRequest, *, slip: dict |
         except gift_voucher_service.VoucherError as exc:
             raise SaleError(exc.message) from exc
 
-    # What the campaigns gave away, added to their running totals so a limit means something at this till from the
-    # next bill onwards, without waiting for head office to tell it (services/promotions_service.py).
-    used: dict[str, tuple[Decimal, Decimal]] = {}
-    for line, promo, disc in zip(payload.lines, line_promos, item_discs):
-        if promo is None:
-            continue
-        qty, amount = used.get(promo.id, (ZERO, ZERO))
-        used[promo.id] = (qty + abs(line.qty), amount + abs(disc))
-    if used:
-        await promotions_service.record_use(used)
+    # Nothing is counted on the campaign itself. What each one gave away reaches head office in the day's figures
+    # (services/snapshot_service.py `promotions`), which is the only place anybody reads it.
 
     # Scan history: the lines still open on this bill were sold.
     from app.services import scan_history_service
