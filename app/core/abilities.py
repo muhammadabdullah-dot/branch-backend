@@ -104,6 +104,13 @@ ABILITIES: list[tuple[str, str, str, str, str]] = [
     ("lists", "branch-console.payment-methods", "W", "Change payment methods", "Rename a method or switch it off at this branch."),
     ("lists", "branch-console.shop-settings", "R", "See receipt and gift voucher settings", ""),
     ("lists", "branch-console.shop-settings", "W", "Change receipt and gift voucher settings", "What bills print, gift voucher value and validity, the wholesale discount, the usual low stock level and how many days each department takes returns."),
+    # Taking a credit customer's money at the counter. These three used to sit with the books, and they are not
+    # book-keeping: the customer is standing at the till. The books themselves are head office's now, so this is the
+    # one part of the old accounts group a branch still does, and it reads better where the work happens.
+    ("counter", "accounts.receivables", "R", "See what a credit customer owes", "Their balance and limit at the counter, so a sale on credit can be judged."),
+    ("counter", "accounts.receivables", "W", "Take payments from credit customers", "Cash goes into the till; card, bank and wallet payments are recorded too."),
+    ("counter", "accounts.receivables", "X", "Void a customer payment", ""),
+
     # ── accounts: the books. Whole-book reports always show every account, because half a statement misleads. ──
     ("accounts-books", "accounts.desk", "R", "Accounts Desk", "Money on hand, what's owed both ways and how the month is going."),
     ("accounts-books", "accounts.desk", "X", "Post the records now", "Posts the latest sales, receipts and payments to the books without waiting."),
@@ -113,7 +120,6 @@ ABILITIES: list[tuple[str, str, str, str, str]] = [
     ("accounts-books", "accounts.month-by-month", "R", "Month by Month", "Always the whole book."),
     ("accounts-books", "accounts.day-book", "R", "Day Book", "Every posted voucher in full, whatever accounts it uses."),
     ("accounts-books", "accounts.ledger", "R", "Account Ledger", "Only for the accounts they can see, ticked at the bottom."),
-    ("accounts-books", "accounts.receivables", "R", "Receivables", "What each credit customer owes, and for how long."),
     ("accounts-books", "accounts.payables", "R", "Payables", "What each supplier is owed, and for how long."),
     ("accounts-books", "accounts.tax", "R", "Tax reports", "GST and withholding tax."),
     # ── accounts: vouchers and money ──
@@ -123,8 +129,6 @@ ABILITIES: list[tuple[str, str, str, str, str]] = [
     ("accounts-vouchers", "accounts.vouchers.reverse", "X", "Reverse posted vouchers", "A journal that undoes the voucher line for line. Both stay on the record."),
     ("accounts-vouchers", "accounts.opening-balances", "R", "See the opening balances", ""),
     ("accounts-vouchers", "accounts.opening-balances", "W", "Write the opening balances", "Including filling them in from the branch's records."),
-    ("accounts-vouchers", "accounts.receivables", "W", "Take payments from credit customers", "Cash goes into the till; card, bank and wallet payments are recorded too."),
-    ("accounts-vouchers", "accounts.receivables", "X", "Void a customer payment", ""),
     ("accounts-vouchers", "accounts.cheques", "R", "See cheques", "Cheques received and when they are due."),
     ("accounts-vouchers", "accounts.cheques", "W", "Record, clear, bounce and cancel cheques", ""),
     ("accounts-vouchers", "accounts.fixed-assets", "R", "Fixed asset register", "Furniture, equipment and vehicles, and what they are worth now."),
@@ -185,6 +189,25 @@ COUNTER_ROLES = (SALESPERSON, PHARMACIST)
 
 ACCOUNTS_ABILITIES = {(resource, action) for group, resource, action, _, _ in ABILITIES if group.startswith("accounts")}
 
+# ── the books are head office's ──────────────────────────────────────────────────────────────────
+# Nobody at a branch opens the books. A branch's accounting rides up to head office on the sync and is read there,
+# by the one person whose job it is; that is how the old software works too, with everything run from head office
+# and a branch dropdown on every report. Keeping a second set of book screens at every branch means two places to
+# keep right and two places to get wrong.
+#
+# So every accounts tick is taken off the branch: off the access screen so it cannot be given, off the Branch
+# Manager starting point so a new manager does not begin with it, off anyone who already holds one, and left out
+# when head office sends access that still has it. Nothing is deleted and no data is touched: the screens, the
+# services and the vouchers all stay exactly where they are, still posting, still syncing up.
+#
+# Taking a credit customer's money is not book-keeping and stays: `accounts.receivables` sits in the Sales counter
+# group now, where that work actually happens.
+#
+# To put the books back at a branch, set this to True. That is the whole switch.
+BOOKS_AT_BRANCH = False
+BOOKS_RESOURCES = frozenset(resource for group, resource, _, _, _ in ABILITIES if group.startswith("accounts"))
+HIDDEN_RESOURCES = frozenset() if BOOKS_AT_BRANCH else BOOKS_RESOURCES
+
 # How the six accounts ticks there used to be become today's, so nobody gains or loses anything when the books were
 # split into a tick per screen and per area. (old resource, action) -> what it now stands for.
 _BOOKS_SCREENS = ("accounts.trial-balance", "accounts.income-statement", "accounts.balance-sheet", "accounts.month-by-month",
@@ -206,7 +229,7 @@ LEGACY_ACCOUNTS: dict[tuple[str, str], set[tuple[str, str]]] = {
 RETIRED_RESOURCES = frozenset({"accounts.books"})
 # Ticks that now stand for nothing: taken off everyone at startup, and left out when head office still sends them.
 # "Sell Pharmacy Items" became the Pharmacist starting point.
-DROPPED_RESOURCES = frozenset({"store.pharmacy"})
+DROPPED_RESOURCES = frozenset({"store.pharmacy"}) | HIDDEN_RESOURCES
 
 
 def is_legacy(resources) -> bool:
@@ -268,7 +291,8 @@ PRESETS: dict[str, dict] = {
     BRANCH_MANAGER: {
         "label": "Branch Manager",
         "discountLimit": Decimal("100"),
-        "abilities": {(resource, action) for _, resource, action, _, _ in ABILITIES} | MANAGER_ONLY_GRANTS,
+        "abilities": {(resource, action) for _, resource, action, _, _ in ABILITIES
+                      if resource not in HIDDEN_RESOURCES} | MANAGER_ONLY_GRANTS,
     },
 }
 

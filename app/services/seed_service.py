@@ -493,12 +493,19 @@ async def sync_role_resource_grants() -> None:
 
 
 async def give_branch_managers_the_books() -> int:
-    """Once: every Branch Manager gets the accounts abilities, so the books have someone until an accountant is added.
-    After that it's the Branch Manager's to hand out or take away like any other tick."""
-    from app.core.abilities import ACCOUNTS_ABILITIES
+    """Once: every Branch Manager got the accounts abilities, so the books had someone until an accountant was added.
+
+    Now the books are head office's and nobody at a branch opens them (`core/abilities.py` BOOKS_AT_BRANCH), so this
+    does nothing. It is kept rather than deleted because it is a one-time rollout guarded by a counter: a branch that
+    has never run it would otherwise run it the day the books were switched back on, handing every manager the whole
+    of accounts years after anyone expected that.
+    """
+    from app.core.abilities import ACCOUNTS_ABILITIES, HIDDEN_RESOURCES
     from app.models import Counter
     from app.services import staff_sync_service
 
+    if HIDDEN_RESOURCES:
+        return 0
     if await Counter.exists(id="rollout:accounts-branch-managers"):
         return 0
     wanted: dict[str, set[str]] = {}

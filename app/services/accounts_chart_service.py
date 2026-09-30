@@ -159,12 +159,66 @@ def group_payload(group: AccountGroup) -> dict:
 
 
 async def account_payload(account: Account) -> dict:
+    """What head office is told about one account.
+
+    A customer's or supplier's own facts ride along: head office keeps no Party or Supplier of its own, and its
+    receivable and payable reports group by area, sub-area and party category and age against the credit days.
+    Read off the party here, where it lives, rather than asked for separately and arriving out of step with the
+    account it belongs to.
+    """
     return {
         "id": str(account.id), "code": account.code, "name": account.name, "groupCode": account.group_id,
         "subGroupCode": account.sub_group_id, "kind": account.kind, "systemKey": account.system_key,
         "partyRef": account.party_ref, "active": account.active, "restricted": account.restricted,
         "bankName": account.bank_name, "bankAccountNo": account.bank_account_no, "standard": account.standard,
+        **await _party_facts(account),
     }
+
+
+async def _party_facts(account: Account) -> dict:
+    """The party behind a customer or supplier account, as head office needs to read it. Empty for every other kind."""
+    from app.models import Party, Supplier
+
+    if not account.party_ref or account.kind not in ("customer", "supplier"):
+        return {}
+    if account.kind == "customer":
+        party = await Party.get_or_none(id=account.party_ref)
+        if party is None:
+            return {}
+        return {
+            "partyCode": party.code, "partyPhone": party.phone, "partyAddress": party.address,
+            "partyArea": party.area, "partySubArea": party.sub_area, "partyCategory": party.category,
+            "partyDueDays": party.due_days, "partyCreditLimit": format(party.credit_limit, "f"),
+        }
+    supplier = await Supplier.get_or_none(id=account.party_ref)
+    if supplier is None:
+        return {}
+    return {
+        "partyCode": supplier.code, "partyPhone": supplier.phone, "partyAddress": supplier.address,
+        "partyContact": supplier.contact_person, "partyCity": supplier.city, "partyDueDays": supplier.due_days,
+    }
+
+
+async def resend_party_accounts() -> int:
+    """Once: send every customer and supplier account up again, so head office fills in the party facts.
+
+    Head office's receivable and payable registers group by area, sub-area and party category and age against each
+    party's own credit days. Those facts now ride up with the account (`account_payload`), but only when the account
+    changes, and a customer's account changes when somebody edits it, which may be never. Without this pass the
+    grouping would be empty for months and nobody would know why.
+
+    Guarded by a counter, so it runs once and then finds nothing to do. Read-only apart from the outbox.
+    """
+    from app.models import Account, Counter
+
+    if await Counter.exists(id="rollout:party-facts-to-head-office"):
+        return 0
+    sent = 0
+    for account in await Account.filter(kind__in=("customer", "supplier")):
+        await emit_account(account)
+        sent += 1
+    await Counter.create(id="rollout:party-facts-to-head-office", value=sent)
+    return sent
 
 
 async def _emit(kind: str, key: str, payload: dict) -> None:

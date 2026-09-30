@@ -60,21 +60,36 @@ async def grants_of(user: User) -> dict[str, set[str]]:
 
 def abilities_catalog() -> dict:
     """Every tick, grouped as the access screen shows it. The account areas also come as a grid (an area a row, See and
-    Use the columns), which is how they read best."""
+    Use the columns), which is how they read best.
+
+    A tick the branch no longer has is not offered here at all (`core/abilities.py` HIDDEN_RESOURCES), and a group
+    left with nothing in it is left out rather than shown empty. That is what stops the books being ticked back on:
+    the screen cannot offer them, the presets do not carry them, and the server strips them from anything head
+    office sends. One switch, `BOOKS_AT_BRANCH`, puts the whole lot back.
+    """
+    from app.core.abilities import HIDDEN_RESOURCES
+
+    groups = []
+    for key, label in GROUPS:
+        abilities = [
+            {"key": f"{resource}:{action}", "resource": resource, "action": action, "label": text, "hint": hint}
+            for group, resource, action, text, hint in ABILITIES
+            if group == key and resource not in HIDDEN_RESOURCES
+        ]
+        grid = None
+        if key == AREAS_GROUP:
+            rows = [{"resource": f"accounts.area.{area}", "label": text, "hint": hint}
+                    for area, text, hint in AREAS if f"accounts.area.{area}" not in HIDDEN_RESOURCES]
+            grid = {"columns": [{"action": action, "label": text} for action, text in AREA_COLUMNS],
+                    "rows": rows} if rows else None
+        if not abilities and grid is None:
+            continue
+        groups.append({"key": key, "label": label, "abilities": abilities, **({"grid": grid} if grid else {})})
     return {
-        "groups": [
-            {"key": key, "label": label, "abilities": [
-                {"key": f"{resource}:{action}", "resource": resource, "action": action, "label": text, "hint": hint}
-                for group, resource, action, text, hint in ABILITIES if group == key
-            ], **({"grid": {
-                "columns": [{"action": action, "label": text} for action, text in AREA_COLUMNS],
-                "rows": [{"resource": f"accounts.area.{area}", "label": text, "hint": hint} for area, text, hint in AREAS],
-            }} if key == AREAS_GROUP else {})}
-            for key, label in GROUPS
-        ],
+        "groups": groups,
         "presets": [
             {"roleId": role_id, "label": p["label"], "discountLimit": str(p["discountLimit"]),
-             "abilities": sorted(f"{r}:{a}" for r, a in p["abilities"])}
+             "abilities": sorted(f"{r}:{a}" for r, a in p["abilities"] if r not in HIDDEN_RESOURCES)}
             for role_id, p in PRESETS.items()
         ],
         # The ticks never offered to a Pharmacist, and the line said beside them.

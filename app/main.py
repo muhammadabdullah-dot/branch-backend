@@ -122,7 +122,12 @@ async def _seed() -> None:
         print(f"  staff: {added_roles} new starting point(s) added", flush=True)
     dropped = await drop_retired_ticks()
     if dropped:
-        print(f"  staff: Sell Pharmacy Items taken off {dropped} account(s); the Pharmacist role decides that now", flush=True)
+        # Names what was actually taken away. It used to say "Sell Pharmacy Items" alone, which stopped being the
+        # whole truth the day the books moved to head office and this pass began stripping 32 accounts ticks too.
+        from app.core.abilities import HIDDEN_RESOURCES
+
+        what = "Sell Pharmacy Items" + (" and the accounts ticks (the books are head office's)" if HIDDEN_RESOURCES else "")
+        print(f"  staff: {what} taken off {dropped} account(s)", flush=True)
     unmoneyed = await drop_pharmacist_money_ticks()
     if unmoneyed:
         print(f"  staff: payment, till, returns and discount ticks taken off {unmoneyed} Pharmacist(s); they print slips now", flush=True)
@@ -162,6 +167,12 @@ async def _seed() -> None:
     if added:
         print(f"  accounts: {added} chart row(s) added", flush=True)
     await accounts_chart_service.ensure_party_accounts()
+    # Head office groups its receivable and payable registers by area, sub-area and party category, which now ride
+    # up with the account. Send every customer and supplier once so those columns are not empty until somebody
+    # happens to edit an account.
+    resent = await accounts_chart_service.resend_party_accounts()
+    if resent:
+        print(f"  accounts: {resent} customer and supplier account(s) resent with their party details", flush=True)
     given = await give_branch_managers_the_books()
     if given:
         print(f"  accounts: {given} Branch Manager account(s) given the books", flush=True)

@@ -410,6 +410,23 @@ async def _bank_account(account_id, what: str) -> Account:
 
 
 @atomic()
+async def emit_cheque(cheque: Cheque, user: User | None = None) -> None:
+    """Tell head office about a cheque, every time it changes.
+
+    Head office keeps the post dated cheque register and the bank reconciliation now, because that is where the
+    accountant sits; nobody at a branch opens the books at all. So every state a cheque passes through has to get
+    there, not only the day it was written: recorded, deposited, cleared, bounced, cancelled, deposited again.
+
+    The payload is `cheque_out`, the same shape the branch's own screen reads, so the two can never drift. Head
+    office keys on the branch and the cheque's id, so a later message updates the earlier one rather than making a
+    second cheque.
+    """
+    await OutboxEvent.create(
+        aggregate_type="Cheque", aggregate_id=str(cheque.id), payload=await cheque_out(cheque),
+        origin_user_id=str(user.id) if user else None, origin_device_id=get_device_id(),
+    )
+
+
 async def record_cheque(user: User, payload: dict) -> Cheque:
     direction = (payload.get("direction") or "received").lower()
     if direction not in ("received", "issued"):
@@ -437,6 +454,7 @@ async def record_cheque(user: User, payload: dict) -> Cheque:
     await _set_lines(cheque, payload.get("lines"))
     if direction == "received":
         await _party_effect(account, -amount)
+    await emit_cheque(cheque, user)
     return cheque
 
 
@@ -495,6 +513,7 @@ async def update_cheque(user: User, cheque_id: str, payload: dict) -> Cheque:
         await _set_lines(cheque, payload.get("lines"))
     elif amount != money(cheque.amount) or await ChequeLine.filter(cheque_id=cheque.id).exists():
         await _set_lines(cheque, await _lines_for_recheck(cheque))
+    await emit_cheque(cheque, user)
     return cheque
 
 
@@ -529,6 +548,7 @@ async def clear_cheque(user: User, cheque_id: str, bank_account_id: str, cleared
     vouchers_service.check_open(await vouchers_service.settings(), day)
     cheque.status, cheque.bank_account, cheque.cleared_on = "cleared", bank, day
     await cheque.save()
+    await emit_cheque(cheque, user)
     return cheque
 
 
@@ -548,6 +568,7 @@ async def bounce_cheque(user: User, cheque_id: str, bounced_on, note: str | None
         cheque.note = _note(cheque.note, f"Bounced: {note.strip()}")
     await cheque.save()
     await _party_effect(cheque.party_account, Decimal(cheque.amount))
+    await emit_cheque(cheque, user)
     return cheque
 
 
@@ -577,6 +598,7 @@ async def undo_cheque(user: User, cheque_id: str, note: str | None) -> Cheque:
     else:
         raise MoneyError(f"{cheque.number} is {_status_word(cheque)}, so there is nothing to undo.")
     await cheque.save()
+    await emit_cheque(cheque, user)
     return cheque
 
 
@@ -601,6 +623,7 @@ async def redeposit_cheque(user: User, cheque_id: str, day_value, note: str | No
         note=_note((note or "").strip() or None, f"Deposited again after {cheque.number} bounced"),
     )
     await _party_effect(cheque.party_account, -Decimal(cheque.amount))
+    await emit_cheque(fresh, user)
     return fresh
 
 
@@ -619,6 +642,7 @@ async def cancel_cheque(user: User, cheque_id: str, reason: str | None) -> Chequ
     await _drop(cheque, *CHEQUE_SOURCES)
     if cheque.direction == "received":
         await _party_effect(cheque.party_account, Decimal(cheque.amount))
+    await emit_cheque(cheque, user)
     return cheque
 
 
